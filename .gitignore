@@ -27,3 +27,11 @@ logs/
 # Shared interpreter settings are tracked; everything else local to VS Code is not.
 .vscode/*
 !.vscode/settings.json
+
+# --- Media (per machine) ---------------------------------------------------
+# Video files go in media/. They are large, binary, and personal to whoever is
+# running the project, so none of them are committed. The folder carries its own
+# .gitignore - ignoring everything inside except that file - so it stays tracked
+# but empty and a fresh clone has somewhere to put them. Like the virtual
+# environment folders, it is deliberately NOT listed here: adding it would
+# untrack its .gitignore and defeat the pattern.

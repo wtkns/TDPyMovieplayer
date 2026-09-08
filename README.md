@@ -1,6 +1,9 @@
 # TDPyMovieplayer
 
-A TouchDesigner project whose network is built by Python, not by hand.
+A movie player whose network is built by Python, not by hand: it reads a folder
+of video files, measures them, and plays them in a random order - each clip
+starting at a random point and running at a random speed, cut to the next after
+a fixed dwell time.
 
 `TDPyMovieplayer.toe` holds no project code. It carries one Execute DAT that reads its
 source from `DAT/StartupExec.py`, puts this folder on `sys.path`, and hands off
@@ -25,6 +28,13 @@ the same helper Derivative ships, passing the name explicitly.
 
 Requires TouchDesigner **2025.32050 or newer** — `.toe` files are
 forward-compatible only.
+
+## Media
+
+Put video files in `media/`. Nothing in there is committed - the files are large,
+binary, and particular to whoever is running the project - so the folder arrives
+empty on a fresh clone and stays tracked via its own `.gitignore`.
+
 
 ## The development loop
 
