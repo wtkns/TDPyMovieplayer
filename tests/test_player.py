@@ -132,3 +132,46 @@ class TestCommand:
         player.command("rewind")
         for name in player.COMMANDS:
             assert name in silent[0]
+
+
+class TestCurrentIndex:
+    def test_finds_the_loaded_clip(self):
+        assert player.current_index(["a", "b", "c"], "b") == 1
+
+    def test_the_first_clip_is_zero_not_falsy_by_accident(self):
+        # 0 is a real answer here, which is the whole reason the "no answer"
+        # case below is None rather than 0.
+        assert player.current_index(["a", "b"], "a") == 0
+
+    def test_an_unknown_clip_is_none_not_the_top(self):
+        # Deliberately not next_index's answer to the same question. There, an
+        # unknown clip means "start at the top"; here it means "nothing is
+        # playing", and answering 0 would highlight a row that is not playing.
+        assert player.current_index(["a", "b"], "gone.mkv") is None
+        assert player.current_index(["a", "b"], "") is None
+
+    def test_an_empty_playlist_is_none(self):
+        assert player.current_index([], "a") is None
+
+
+class TestPlayOrder:
+    def test_is_the_table_order_today(self):
+        assert player.play_order(3) == [0, 1, 2]
+
+    def test_an_empty_playlist_is_an_empty_order(self):
+        assert player.play_order(0) == []
+
+    def test_a_negative_count_is_not_a_negative_range(self):
+        assert player.play_order(-1) == []
+
+    def test_every_row_appears_exactly_once(self):
+        # The property Phase 4's shuffled deck has to keep when it replaces the
+        # body of this function - a deck that drops or repeats a row would show
+        # up here rather than as clips that never play.
+        order = player.play_order(20)
+        assert sorted(order) == list(range(20))
+
+    def test_covers_the_playlist_it_was_measured_from(self):
+        paths = ["a", "b", "c", "d"]
+        order = player.play_order(len(paths))
+        assert [paths[i] for i in order] == paths

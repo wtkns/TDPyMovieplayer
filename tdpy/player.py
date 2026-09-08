@@ -103,6 +103,55 @@ def next_index(paths, current):
     return (paths.index(current) + 1) % len(paths)
 
 
+def current_index(paths, current):
+    """Which playlist row is loaded now, or None if none of them is.
+
+    Deliberately not `next_index`'s answer for the same question. That one
+    returns 0 for a `current` it cannot find, because starting at the top is
+    the right thing to *play* next. Here the same case means nothing is
+    playing, and answering 0 would tell the display to highlight the first
+    clip - which is a lie a viewer has no way of catching.
+    """
+    if current in paths:
+        return paths.index(current)
+    return None
+
+
+def play_order(count):
+    """The playlist's rows, in the order they are going to be played.
+
+    `range(count)` today, because `next_clip` walks the table top to bottom.
+    Phase 4's shuffled deck replaces the body of this function and nothing
+    else: the display asks for the order rather than reading the table in
+    order, so a deck that is not the table's order arrives in the list without
+    the list being touched.
+
+    Takes a count rather than reaching for the table, which is what keeps it
+    testable at a prompt like the rest of this module.
+    """
+    return list(range(max(int(count), 0)))
+
+
+def playlist_table():
+    """The playlist DAT, or None - the display reads its rows for their text."""
+    _, table = _ops()
+    return table
+
+
+def now_playing():
+    """(playlist row being shown, number of clips), or (None, 0).
+
+    The display's one question, answered in the one place that knows how to
+    ask it. Read off the player's own `file` every time, so there is no stored
+    index here either - see the module docstring, and `next_clip` below.
+    """
+    player, table = _ops()
+    if player is None:
+        return None, 0
+    paths = clip_paths(table)
+    return current_index(paths, str(player.par.file.val)), len(paths)
+
+
 def next_clip():
     """Load the following row of the playlist and play it.
 
