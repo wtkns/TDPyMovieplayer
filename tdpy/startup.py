@@ -15,9 +15,16 @@ import importlib
 import os
 import pathlib
 import sys
+import time
 import traceback
 
 PACKAGE = __name__.split(".")[0]
+
+#: Stamp on every reported line. Short on purpose - these lines are read minutes
+#: after something broke, not months later, and a full ISO timestamp doubles the
+#: width of a log whose messages are mostly short. The year is the one thing it
+#: gives up; the file's own mtime still has it.
+TIMESTAMP = "%m-%d %H:%M:%S"
 
 #: Environment folders are named `<something>_vEnv`. TDPyEnvManager appends that
 #: suffix itself - see appendVEnvSuffix() in its helper - so the pattern holds
@@ -30,6 +37,20 @@ def project_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent
 
 
+def stamp(message: str, now: str = None) -> str:
+    """Prefix a message with the time, leaving any continuation lines alone.
+
+    Only the first line is stamped. Multi-line messages here are nearly always
+    tracebacks, and a timestamp down the left of one makes it useless for the
+    thing tracebacks are for - pasting somewhere and reading top to bottom.
+
+    Takes `now` so the format is testable without freezing the clock.
+    """
+    now = time.strftime(TIMESTAMP) if now is None else now
+    first, separator, rest = message.partition("\n")
+    return f"[{now}] {first}" + separator + rest
+
+
 def report(message: str) -> None:
     """Put a message somewhere it will actually be seen.
 
@@ -37,13 +58,20 @@ def report(message: str) -> None:
     surfaces them inconsistently, and a startup that failed otherwise looks
     identical to a project that simply did nothing. Print to the textport and
     keep a file copy for when the textport was not open.
+
+    Both copies get the same stamp. The textport is a running session where the
+    time looks redundant, but a line pasted out of it into a bug report or a log
+    entry stops being self-dating the moment it leaves, and the log file is
+    append-only across every launch - without a stamp there is nothing marking
+    where one session ends and the next begins.
     """
-    print(message)
+    line = stamp(message)
+    print(line)
     try:
         log_dir = project_root() / "logs"
         log_dir.mkdir(exist_ok=True)
         with open(log_dir / "startup.log", "a", encoding="utf-8") as handle:
-            handle.write(message.rstrip() + "\n")
+            handle.write(line.rstrip() + "\n")
     except OSError:
         pass  # logging must never be the thing that breaks startup
 
