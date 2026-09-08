@@ -12,11 +12,17 @@ never at module scope.
 """
 
 import importlib
+import os
 import pathlib
 import sys
 import traceback
 
 PACKAGE = __name__.split(".")[0]
+
+#: Environment folders are named `<something>_vEnv`. TDPyEnvManager appends that
+#: suffix itself - see appendVEnvSuffix() in its helper - so the pattern holds
+#: whether the environment was made by the component or by create-venv.bat.
+VENV_SUFFIX = "_vEnv"
 
 
 def project_root() -> pathlib.Path:
@@ -45,8 +51,62 @@ def report(message: str) -> None:
 def main():
     """Called from the Execute DAT's onStart."""
     report(f"[{PACKAGE}] startup from {project_root()}")
+    report(environment_report())
     _add_controls()
     return build()
+
+
+def _site_packages(environment):
+    """Every site-packages directory that could belong to one environment.
+
+    Windows puts it at `Lib/site-packages`, macOS at
+    `lib/python3.11/site-packages`. Both are checked rather than branching on
+    the platform: guessing wrong here would report a working environment as
+    missing, which is worse than looking in one extra place.
+    """
+    candidates = [environment / "Lib" / "site-packages"]
+    candidates.extend(sorted(environment.glob("lib/python*/site-packages")))
+    return [path for path in candidates if path.is_dir()]
+
+
+def environment_report(root=None, search_path=None) -> str:
+    """One line saying whether the side-loaded environment actually loaded.
+
+    Worth reporting because it is genuinely unclear from the outside. A context
+    file written by TDPyEnvManager's CLI records `active: false`, where the
+    component's own pulse records `true` - and the helper reads that flag into
+    `startAsActive` and then never uses it, while linking the environment
+    unconditionally whenever a context file is found. Rather than reason about
+    which of those wins, look at `sys.path` and say what is there.
+
+    Takes `root` and `search_path` so it can be tested without a project or a
+    running TouchDesigner.
+    """
+    root = project_root() if root is None else pathlib.Path(root)
+    search_path = sys.path if search_path is None else search_path
+
+    # sys.path holds whatever string was inserted - not necessarily normalised,
+    # and on Windows not necessarily the same case or separator.
+    on_path = {os.path.normcase(os.path.abspath(entry)) for entry in search_path}
+    environments = sorted(
+        path for path in root.glob("*" + VENV_SUFFIX) if path.is_dir()
+    )
+
+    if not environments:
+        return (
+            f"[{PACKAGE}] no {VENV_SUFFIX} folder in {root} - run create-venv.bat"
+        )
+
+    for environment in environments:
+        for packages in _site_packages(environment):
+            if os.path.normcase(os.path.abspath(str(packages))) in on_path:
+                return f"[{PACKAGE}] environment linked: {environment.name}"
+
+    found = ", ".join(environment.name for environment in environments)
+    return (
+        f"[{PACKAGE}] environment NOT on sys.path: {found}"
+        " - link it in the tdPyEnvManager component"
+    )
 
 
 def _add_controls():

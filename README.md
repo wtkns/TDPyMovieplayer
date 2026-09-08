@@ -59,6 +59,11 @@ You do not save the `.toe`. Your work is not in it.
 Exceptions raised inside a DAT callback are easy to lose. The build is wrapped,
 and failures are printed to the textport and appended to `logs/startup.log`.
 
+Startup also reports whether the side-loaded environment actually loaded — one
+line naming the environment it found on `sys.path`, or saying it did not find
+one. Worth having, because a missing environment shows up otherwise as an
+unrelated `ImportError` in `build()`.
+
 ## Two constraints worth knowing
 
 TouchDesigner's globals — `op()`, `project`, the operator classes — are injected
