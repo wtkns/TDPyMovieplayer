@@ -26,6 +26,12 @@ project and offers no override, so a project living in a directory named for
 something else gets an environment named after that instead. The script calls
 the same helper Derivative ships, passing the name explicitly.
 
+One consequence: the component's status will read *could not find a valid vEnv*,
+because it discovers environments by folder name too. The environment is linked
+by a different route — `envName` in `TDPyEnvManagerContext.json` — so it works
+regardless, and `logs/startup.log` says so on every launch. Install packages with
+`TDPyMovieplayer_vEnv/Scripts/pip` rather than through the component's UI.
+
 Requires TouchDesigner **2025.32050 or newer** — `.toe` files are
 forward-compatible only.
 

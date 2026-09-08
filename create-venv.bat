@@ -64,6 +64,15 @@ REM  delete the project. Answering the prompt cannot.
 pushd "%ROOT_NB%"
 echo N| "!TD_ROOT!\bin\python.exe" "!HELPER!" --mode "Python vEnv" --installPath "%ROOT_NB%" --envName "!ENV_NAME!" --pythonVersion "%PY_VERSION%"
 set "RESULT=%ERRORLEVEL%"
+
+REM  The helper writes "active": false - it records self.Ready, which the CLI
+REM  path never sets. TouchDesigner reads that flag at startup and skips linking
+REM  the environment, so the first launch after creating one would come up
+REM  without it. Verified rather than assumed: a launch with false did not link,
+REM  the next with true did. Flip it here so no project ever starts cold.
+if "!RESULT!"=="0" if exist "TDPyEnvManagerContext.json" (
+    "!TD_ROOT!\bin\python.exe" -c "import json,pathlib;p=pathlib.Path('TDPyEnvManagerContext.json');d=json.loads(p.read_text());d['active']=True;p.write_text(json.dumps(d,indent=4))"
+)
 popd
 
 endlocal & exit /b %RESULT%
