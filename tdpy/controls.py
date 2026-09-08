@@ -56,7 +56,10 @@ def ensure_rebuild_button():
         if existing is not None:
             existing.destroy()
 
-    button = parent.create(td.buttonCOMP, BUTTON_NAME)
+    # startup.create rather than parent.create: the latter appends a digit
+    # rather than fail when it will not use a name, which is how this button
+    # spent its first sessions at "rebuild1" while the code called it "rebuild".
+    button = startup.create(parent, td.buttonCOMP, BUTTON_NAME)
     button.nodeX, button.nodeY = -250, 0
     # Two separate flags, and both are needed: `viewer` draws the panel on the
     # node, `activeViewer` makes that drawing respond to the mouse. With only
@@ -66,7 +69,7 @@ def ensure_rebuild_button():
     startup.set_par(button, "buttontype", BUTTON_TYPE)
     startup.set_par(button, "label", "rebuild")
 
-    executor = parent.create(td.panelexecuteDAT, EXECUTE_NAME)
+    executor = startup.create(parent, td.panelexecuteDAT, EXECUTE_NAME)
     executor.nodeX, executor.nodeY = -250, -150
     executor.text = CALLBACK
 

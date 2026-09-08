@@ -166,6 +166,42 @@ def build():
     return result
 
 
+def create(parent, optype, name):
+    """Create an operator, and give it the name that was asked for.
+
+    `COMP.create()` treats its name argument as a base rather than a
+    requirement: where it will not use the name it appends a digit, returns the
+    node under that instead, and says nothing. It does this even when the name
+    is free - the rebuild button landed at `rebuild1` on every cold launch of
+    both projects built with this framework, and renaming it immediately
+    afterwards succeeds, which is only possible if nothing held the name. Why
+    create() declines an available name is not established, and this does not
+    guess at it; taking the name afterwards works whichever the reason.
+
+    Silent when it succeeds, because it succeeds on every node of every build
+    and six log lines a launch to say so would bury the ones that matter. Note
+    that the silence does not distinguish a rename from a create() that behaved
+    - only comparing against a run without this function does that.
+    """
+    operator = parent.create(optype, name)
+    if operator.name == name:
+        return operator
+
+    holder = parent.op(name)
+    if holder is not None and holder is not operator:
+        report(
+            f"[{PACKAGE}] {parent.path}/{name} is held by a {holder.type}"
+            f" - left as {operator.name}"
+        )
+        return operator
+
+    attempted = operator.name
+    operator.name = name
+    if operator.name != name:
+        report(f"[{PACKAGE}] could not rename {attempted} to {name}")
+    return operator
+
+
 def set_par(operator, name, value):
     """Set a parameter, reporting rather than raising if the name is wrong.
 
@@ -180,6 +216,69 @@ def set_par(operator, name, value):
         return None
     parameter.val = value
     return parameter
+
+
+def set_menu(operator, name, choice):
+    """Set a menu parameter, given either its internal name or its UI label.
+
+    Menu items carry two names - the internal one stored in the file
+    (`sequential`) and the label the parameter dialog draws ("Sequential") -
+    and neither is derivable from the other. This is the one mistake `set_par`
+    cannot catch: with a menu, the parameter genuinely exists, so a wrong item
+    name raises nothing useful and the network is quietly built on the default.
+
+    Resolving against the live parameter is the only reliable answer, because
+    the live parameter is the only place both lists are written down.
+    TouchDesigner's own parameter help ships the labels in prose and the
+    internal names not at all.
+
+    Accepts either form and matches case-insensitively. When the caller passed
+    something other than the exact internal name, the resolved name is reported
+    once - so a project that was written against labels ends up with its real
+    tokens in the log, ready to be pasted back into the source.
+    """
+    parameter = getattr(operator.par, name, None)
+    if parameter is None:
+        report(f"[{PACKAGE}] no parameter {name!r} on {operator.path}")
+        return None
+
+    names = list(getattr(parameter, "menuNames", None) or ())
+    if not names:
+        report(f"[{PACKAGE}] {operator.path}.{name} is not a menu")
+        return None
+    # menuLabels is the same length as menuNames, but read defensively: a
+    # mismatch here should cost the label lookup, not raise inside a build.
+    labels = list(getattr(parameter, "menuLabels", None) or ())
+
+    index = _menu_index(names, labels, str(choice))
+    if index is None:
+        report(
+            f"[{PACKAGE}] {operator.path}.{name}: no menu item {choice!r}"
+            f" - have {', '.join(names)}"
+        )
+        return None
+
+    parameter.menuIndex = index
+    if names[index] != str(choice):
+        report(f"[{PACKAGE}] {operator.path}.{name} = {names[index]!r} ({choice!r})")
+    return parameter
+
+
+def _menu_index(names, labels, wanted):
+    """Find `wanted` among menu names first, then labels. None if absent.
+
+    Names are tried before labels, and exactly before case-insensitively, so a
+    menu whose label collides with a different item's internal name resolves
+    the way the file spells it rather than the way the dialog draws it.
+    """
+    if wanted in names:
+        return names.index(wanted)
+    folded = wanted.casefold()
+    for candidates in (names, labels):
+        for index, item in enumerate(candidates):
+            if str(item).casefold() == folded:
+                return index
+    return None
 
 
 def reload():

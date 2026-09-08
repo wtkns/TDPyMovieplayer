@@ -229,3 +229,23 @@ class TestSummarise:
     def test_flags_unmeasured_files(self):
         rows = [{"duration": 60.0}, {"duration": 0.0}]
         assert playlist.summarise(rows).endswith("1 unmeasured")
+
+
+def test_clip_path_returns_the_row_asked_for():
+    rows = [{"path": "media/a.mov"}, {"path": "media/b.mov"}]
+    assert playlist.clip_path(rows, 1) == "media/b.mov"
+
+
+def test_clip_path_defaults_to_the_first_row():
+    assert playlist.clip_path([{"path": "media/a.mov"}]) == "media/a.mov"
+
+
+def test_clip_path_of_an_empty_playlist_is_empty():
+    """A clone with no media is normal, and must build a player with no file."""
+    assert playlist.clip_path([]) == ""
+
+
+def test_clip_path_wraps_rather_than_raising():
+    rows = [{"path": "media/a.mov"}, {"path": "media/b.mov"}]
+    assert playlist.clip_path(rows, 2) == "media/a.mov"
+    assert playlist.clip_path(rows, -1) == "media/b.mov"

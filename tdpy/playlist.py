@@ -207,6 +207,23 @@ def scan(root, ffprobe=None):
     return rows
 
 
+def clip_path(rows, index=0):
+    """The path of one playlist row, or "" when there is no such row.
+
+    An empty playlist is a normal state, not an error: `media/` is gitignored,
+    so a fresh clone has an empty one, and a scan that finds nothing should
+    produce a player with no file loaded rather than a failed build. TouchDesigner
+    treats an empty `file` parameter as no movie, which is exactly right.
+
+    The index is taken modulo the length so a caller cannot run off the end.
+    Phase 4 draws from a shuffled deck and will not need that, but the wrap
+    costs nothing and turns a whole class of off-by-one into a repeat.
+    """
+    if not rows:
+        return ""
+    return rows[index % len(rows)]["path"]
+
+
 def summarise(rows):
     """One line for the startup log. Says enough to spot a bad scan."""
     if not rows:

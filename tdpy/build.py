@@ -3,10 +3,16 @@
 This is the file to edit. It is the only module that reaches into TouchDesigner,
 which keeps the rest of the package readable - and testable - outside it.
 
-Phase 1 builds the playlist and nothing else: a Table DAT holding one row per
-video file in `media/`, measured. No playback yet - that is Phase 2. The Phase 0
-placeholder network (a noise TOP proving the .toe could run Python off disk) is
-gone, having done its job.
+Phase 2 builds the playlist and one clip playing from it: a Table DAT holding
+one row per video file in `media/`, a Movie File In TOP loading the first of
+them, and a null TOP to hang the rest of the project off. One clip, no cycling -
+the shuffled deck, the random cue point and the dwell timer are all Phase 4.
+
+Parameter names here were looked up rather than guessed, with
+`py -3.11 -m scaffold.params moviefileinTOP` in the framework repository, which
+reads the help table TouchDesigner ships in its own `Config/`. Menu items are
+set through `startup.set_menu`, which resolves them against the live parameter -
+the help table lists menu items in prose and never gives their internal names.
 
 Any import of `td` or of a third-party package belongs inside build(), not at
 module scope: this module is imported early enough that the side-loaded
@@ -27,6 +33,30 @@ BUILD_ROOT = "generated"
 #: Name of the Table DAT holding the playlist. Phase 2 onwards reads the clips
 #: out of here, so it is named once and referred to rather than spelled again.
 PLAYLIST_DAT = "playlist"
+
+#: The Movie File In TOP that decodes a clip, and the null TOP that terminates
+#: the chain. Everything downstream - the switch of Phase 6, the output of
+#: whatever displays this - connects to the null rather than to the player, so
+#: the player can be replaced without anything else being rewired.
+PLAYER_TOP = "player"
+OUT_TOP = "out"
+
+#: Which playlist row to load. Phase 4 replaces this with a draw from a shuffled
+#: deck; until then it is the first clip, chosen because a fixed one makes a
+#: rebuild comparable with the one before it.
+FIRST_CLIP = 0
+
+#: Play Mode. Sequential is the default already, and is set anyway because the
+#: rest of the design depends on it: Cue and Speed are documented as working
+#: only in this mode, so a project that quietly ended up in Locked to Timeline
+#: would fail at Phase 4 rather than here.
+#:
+#: The internal name, not the UI label "Sequential". It was written as the label
+#: first - which is the half TouchDesigner's own help documents - and set_menu
+#: reported back what it resolved to on the first launch, which is how the token
+#: below came to be read off the parameter rather than guessed. Either form
+#: works; the name is kept because it costs no translation and no log line.
+PLAY_MODE = "sequential"
 
 
 def build():
@@ -50,13 +80,54 @@ def build():
     if previous is not None:
         previous.destroy()
 
-    container = parent.create(td.baseCOMP, BUILD_ROOT)
+    # startup.create rather than parent.create throughout: the latter appends a
+    # digit rather than fail when it will not use a name, and every name here is
+    # referred to again - by the log, by the next phase, or by a wire.
+    container = startup.create(parent, td.baseCOMP, BUILD_ROOT)
     container.nodeX, container.nodeY = 0, 0
 
-    table = _place(container.create(td.tableDAT, PLAYLIST_DAT), 0, 0)
-    _fill_playlist(table, td)
+    table = _place(startup.create(container, td.tableDAT, PLAYLIST_DAT), 0, 0)
+    rows = _fill_playlist(table, td)
+    _add_player(container, rows, td)
 
     return container
+
+
+def _add_player(container, rows, td):
+    """One Movie File In TOP, playing, into a null.
+
+    The null is not decoration. A Movie File In TOP is the operator most likely
+    to be replaced - by a second one and a Switch TOP at Phase 6 - and anything
+    connected to it directly would have to be rewired when that happens.
+    """
+    from . import playlist, startup
+
+    player = _place(
+        startup.create(container, td.moviefileinTOP, PLAYER_TOP), 0, -200
+    )
+    out = _place(startup.create(container, td.nullTOP, OUT_TOP), 250, -200)
+    out.inputConnectors[0].connect(player)
+
+    # Relative to the .toe, which sits at the project root - the same root the
+    # playlist stored these paths against. Keeping them relative is what lets
+    # the repository be cloned to a different folder and still play.
+    path = playlist.clip_path(rows, FIRST_CLIP)
+    startup.set_par(player, "file", path)
+    startup.set_menu(player, "playmode", PLAY_MODE)
+    startup.set_par(player, "play", True)
+    startup.set_par(player, "speed", 1.0)
+
+    # TOPs draw their image on the node when the viewer flag is set, which is
+    # all "on screen" needs to mean at this phase. A perform window is a Phase 5
+    # concern, and would be one more thing to undo if it were built now.
+    player.viewer = True
+    out.viewer = True
+
+    startup.report(
+        f"[{startup.PACKAGE}] player at {out.path} <- "
+        + (path or "no file - playlist is empty")
+    )
+    return out
 
 
 def _fill_playlist(table, td):
