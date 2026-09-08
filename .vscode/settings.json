@@ -1,0 +1,9 @@
+{
+  // Point VS Code at the TouchDesigner-derived virtual environment so the
+  // editor's Python matches the interpreter the project actually runs under.
+  "python.defaultInterpreterPath": "${workspaceFolder}/TDPyMovieplayer_vEnv/Scripts/python.exe",
+
+  // Resolve `import tdpy...` from the repository root, the way the Execute DAT
+  // does at runtime.
+  "python.analysis.extraPaths": ["${workspaceFolder}"]
+}

@@ -1,0 +1,29 @@
+# --- TouchDesigner ---------------------------------------------------------
+# Incremental saves (TouchDesigner names them Project.1.toe) and the backup folder.
+Backup/
+*.[0-9]*.toe
+*.[0-9]*.tox
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- Environment (per machine) ---------------------------------------------
+# Virtual environment folders carry their own .gitignore, ignoring everything
+# inside except that file - so a directory stays tracked but empty. They are
+# deliberately NOT listed here: adding one would untrack its .gitignore and
+# defeat the pattern.
+#
+# TDPyEnvManagerContext.json records an absolute installPath for one machine,
+# so it is per-machine rather than shared. requirements.txt is the portable
+# record; regenerate the environment from it with tdPyEnvManager.
+TDPyEnvManagerContext.json
+
+# --- Runtime ---------------------------------------------------------------
+logs/
+
+# --- Editor ----------------------------------------------------------------
+# Shared interpreter settings are tracked; everything else local to VS Code is not.
+.vscode/*
+!.vscode/settings.json
