@@ -1,0 +1,3 @@
+# Ignore everything in the virtual environment directory except this file
+*
+!.gitignore

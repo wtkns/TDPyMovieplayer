@@ -1,0 +1,14 @@
+# Development dependencies - the test suite only, not the project.
+#
+# tdpy/playlist.py is standard library throughout, so these tests need nothing
+# TouchDesigner has and run on a plain system Python. Kept out of
+# requirements.txt on purpose: that file is the portable record of the runtime
+# environment tdPyEnvManager rebuilds, and pytest has no business in it.
+#
+# Install with:
+#   py -3.11 -m venv dev_vEnv
+#   dev_vEnv\Scripts\python -m pip install -r requirements-dev.txt
+#
+# Run with:
+#   dev_vEnv\Scripts\python -m pytest
+pytest==9.1.1

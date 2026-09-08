@@ -41,6 +41,34 @@ Put video files in `media/`. Nothing in there is committed - the files are large
 binary, and particular to whoever is running the project - so the folder arrives
 empty on a fresh clone and stays tracked via its own `.gitignore`.
 
+Every build scans that folder into a Table DAT at `generated/playlist`: one row
+per file, with name, relative path, size, duration, frame rate, dimensions and
+codec. Accepted extensions are TouchDesigner's own movie-reader list minus the
+audio-only containers — see `VIDEO_EXTENSIONS` in `tdpy/playlist.py`, which
+records where the list came from.
+
+Durations come from `ffprobe`. That is not an external dependency: TouchDesigner
+ships `ffprobe.exe` in its own `bin/`, beside `TouchDesigner.exe` and the libav
+DLLs the Movie File In TOP is built on, and `app.binFolder` is how the build
+finds it. Probing is fast enough — around half a second for twenty files, 4 GB —
+that the scan runs on every build rather than caching to a sidecar. If ffprobe
+cannot be found the playlist is still built, with every duration reading 0 and a
+line in the log saying why.
+
+## Tests
+
+The playlist scan is plain Python over plain files, so it is tested outside
+TouchDesigner:
+
+```
+py -3.11 -m venv dev_vEnv
+dev_vEnv\Scripts\python -m pip install -r requirements-dev.txt
+dev_vEnv\Scripts\python -m pytest
+```
+
+`requirements-dev.txt` is kept separate from `requirements.txt` on purpose: the
+latter is the portable record of the runtime environment tdPyEnvManager
+rebuilds, and pytest has no business in it.
 
 ## The development loop
 
