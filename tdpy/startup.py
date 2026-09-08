@@ -202,6 +202,40 @@ def create(parent, optype, name):
     return operator
 
 
+def td_enum(name):
+    """A TouchDesigner enum class by name - ParMode, JustifyType, and the rest.
+
+    **They are not on the `td` module.** That is the obvious guess and a wrong
+    one: they are defined in `tdutils/TDDefinitions.py` as plain `enum.Enum`
+    subclasses and injected into DAT and textport scope from there, so a module
+    imported from disk sees neither the globals nor a `td` attribute. Importing
+    the definition module is the documented-by-reading answer.
+
+    Reports rather than returning None quietly when it cannot find one, which
+    is the whole point of this function existing rather than each caller
+    writing a getattr. `lister._justify` was written as
+    `getattr(td, "JustifyType", None)` with a comment saying a missing constant
+    should cost the justification and not the build - so it cost the
+    justification, on every launch, and said nothing. A guard that converts a
+    wrong assumption into a no-op is worse than no guard, because it removes
+    the evidence.
+
+    An alternative that cannot break at all, if this import ever moves: take
+    the class off a live value of the right type, e.g. `type(some_par.mode)`.
+    Not used here because it needs an operator to hand and the import does not.
+    """
+    try:
+        from tdutils import TDDefinitions
+    except ImportError:
+        report(f"[{PACKAGE}] no tdutils.TDDefinitions - is this TouchDesigner?")
+        return None
+
+    found = getattr(TDDefinitions, name, None)
+    if found is None:
+        report(f"[{PACKAGE}] no {name} in tdutils.TDDefinitions")
+    return found
+
+
 def set_par(operator, name, value):
     """Set a parameter, reporting rather than raising if the name is wrong.
 

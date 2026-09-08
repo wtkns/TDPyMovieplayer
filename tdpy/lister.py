@@ -173,15 +173,15 @@ def cell_text(table, order, row, col):
 def _justify(name):
     """A JustifyType by name, or None where there is no TouchDesigner.
 
-    Looked up rather than imported so this module still imports at a prompt,
-    which is what the tests below the folder depend on. A missing constant
-    costs the justification of a column, not the build.
+    This was `getattr(td, "JustifyType", None)` until 2026-09-08, on the
+    assumption that TouchDesigner's enums hang off the `td` module. They do
+    not - they live in `tdutils.TDDefinitions` - so every column was justified
+    by default and the guard reported nothing, because it had been written to
+    treat a missing constant as acceptable. It was not a missing constant; it
+    was a wrong path, and the two are indistinguishable through a getattr.
+    `startup.td_enum` now says so out loud.
     """
-    try:
-        import td
-    except ImportError:
-        return None
-    return getattr(getattr(td, "JustifyType", None), name, None)
+    return getattr(startup.td_enum("JustifyType"), name, None)
 
 
 def _table_and_order():

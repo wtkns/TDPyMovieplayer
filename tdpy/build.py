@@ -81,9 +81,10 @@ VIDEO_WINDOW_COMP = "videoPlayerWindow"
 #: display exclusively while the renamed one tries to take the same one.
 #:
 #: `window` was the video window's name through Phase 2, renamed when a second
-#: window arrived and "the window" stopped meaning anything. Removable once no
-#: session or saved .toe can still be carrying one.
-LEGACY_NAMES = ("window",)
+#: window arrived and "the window" stopped meaning anything. `bindSpike` and
+#: its window were the Phase 4b binding spike, deleted once it had answered.
+#: Removable once no session or saved .toe can still be carrying one.
+LEGACY_NAMES = ("window", "bindSpike", "bindSpikeWindow")
 
 #: Which display, as a **zero-based** index into the Monitors DAT - the same
 #: order `td.monitors` is in, and one less than the number Windows' own display
