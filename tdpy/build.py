@@ -58,6 +58,57 @@ FIRST_CLIP = 0
 #: works; the name is kept because it costs no translation and no log line.
 PLAY_MODE = "sequential"
 
+#: The Window COMP that puts `out` on a display. Created beside the build
+#: container rather than inside it - see _add_window for why.
+WINDOW_COMP = "window"
+
+#: Which display, in the Window COMP's own numbering (the number its Display
+#: parameter shows, not a Python index into `td.monitors`).
+WINDOW_DISPLAY = 2
+
+#: Positioning is relative to whatever area this names, and WINDOW_DISPLAY
+#: above only means anything when that area is a specified display rather than
+#: the primary one. The alternatives are `primarydisplay` and `alldisplays`.
+WINDOW_AREA = "specifydisplay"
+
+#: Opening Size. Exclusive rather than a borderless window filling the screen:
+#: it hands the display to TouchDesigner outright, which is what a playback
+#: machine wants and what a second monitor is here for.
+WINDOW_SIZE = "exclusive"
+
+#: The three tokens above and below were read off the live parameters, not
+#: guessed. They could not be read out of libTD.dll the way `sequential` was -
+#: the binary carries parameter labels but not menu items - so they were first
+#: written as UI labels and set_menu reported what each resolved to. It also
+#: caught the one that was wrong: "Single Monitor" is not an item on
+#: justifyoffsetto, and set_menu refused it and listed the real three rather
+#: than writing a wrong value.
+WINDOW_JUSTIFY = "center"
+
+#: DPI Scaling. The alternative is `usedpiscale` ("Use DPI Scale"), which is
+#: what TouchDesigner warns about on this machine: "the current position and DPI
+#: scaling settings of your displays result in overlapping displays when working
+#: with Scaled DPI Scaling."
+#:
+#: The warning is about the desktop arrangement, not about this window. The
+#: displays here are mixed-DPI - a 3840x2160 primary at 150% beside two
+#: 2560x1440 panels at 100% - so the two coordinate spaces disagree about where
+#: the right-hand pair starts: physical x 3840, scaled x 2560, because the
+#: primary is 3840 native and 2560 scaled. Anything paring a scaled origin with
+#: a native size overlaps by that 1280.
+#:
+#: Native is both the fix and the right setting on its own terms: measured in
+#: physical pixels the three displays tile exactly edge to edge, with no overlap
+#: and no gaps, and an exclusive fullscreen output wants true pixels rather than
+#: scaled ones. TouchDesigner has a matching warning for Native, so if that one
+#: appears instead, the physical layout is not as clean as Windows reports it.
+WINDOW_DPI = "native"
+
+#: Whether to open the window at startup. Off is the useful setting when
+#: working on the network itself: an exclusive fullscreen window takes the
+#: display away from whatever is on it.
+OPEN_WINDOW = True
+
 
 def build():
     """Create the network, replacing whatever the last build left behind.
@@ -88,9 +139,69 @@ def build():
 
     table = _place(startup.create(container, td.tableDAT, PLAYLIST_DAT), 0, 0)
     rows = _fill_playlist(table, td)
-    _add_player(container, rows, td)
+    out = _add_player(container, rows, td)
+    _add_window(parent, out, td)
 
     return container
+
+
+def _add_window(parent, target, td):
+    """A Window COMP showing `target` on its own display.
+
+    Created *beside* the build container, for the same reason the rebuild
+    button is: build() destroys and recreates its own container, and a Window
+    COMP inside it would go with everything else - closing and reopening an
+    exclusive fullscreen window on every rebuild, which during Phase 4 means on
+    every edit. Out here it is converged onto rather than recreated, so a
+    rebuild leaves an open window alone.
+
+    That works because `winop` stores a path, not a reference. The path is
+    stable across rebuilds even though the operator at the end of it is not, so
+    the window re-resolves to the new `out` without being touched.
+    """
+    from . import startup
+
+    existing = parent.op(WINDOW_COMP)
+    window = existing if existing is not None else startup.create(
+        parent, td.windowCOMP, WINDOW_COMP
+    )
+    window.nodeX, window.nodeY = -250, -300
+
+    startup.set_par(window, "winop", target.path)
+    startup.set_menu(window, "justifyoffsetto", WINDOW_AREA)
+    startup.set_par(window, "display", WINDOW_DISPLAY)
+    startup.set_menu(window, "justifyh", WINDOW_JUSTIFY)
+    startup.set_menu(window, "justifyv", WINDOW_JUSTIFY)
+    startup.set_menu(window, "size", WINDOW_SIZE)
+    startup.set_menu(window, "dpiscaling", WINDOW_DPI)
+
+    # Only on the launch that created it. Pulsing winopen on every rebuild
+    # would reopen a window that is already open, and with an exclusive display
+    # that is a mode change rather than a no-op.
+    if existing is None and OPEN_WINDOW:
+        _pulse(window, "winopen")
+
+    startup.report(
+        f"[{startup.PACKAGE}] window at {window.path} -> {target.path}"
+        f" on display {WINDOW_DISPLAY}"
+    )
+    return window
+
+
+def _pulse(operator, name):
+    """Fire a pulse parameter, reporting rather than raising if it is missing.
+
+    Not set_par: a pulse is an event, and assigning to its value is not the
+    same as firing it.
+    """
+    from . import startup
+
+    parameter = getattr(operator.par, name, None)
+    if parameter is None:
+        startup.report(f"[{startup.PACKAGE}] no parameter {name!r} on {operator.path}")
+        return None
+    parameter.pulse()
+    return parameter
 
 
 def _add_player(container, rows, td):
