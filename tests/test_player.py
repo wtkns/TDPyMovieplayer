@@ -55,33 +55,162 @@ def silent(monkeypatch):
     return lines
 
 
-class TestNextIndex:
+class TestStepIndex:
+    """What `next_index` used to cover, in deck terms, plus the new direction.
+
+    The transport moves through the *deck*, so this answers playlist rows from
+    deck positions. Unshuffled the two coincide, which is why most of these
+    read like the old sequential tests - the shuffled cases below are where
+    they stop coinciding.
+    """
+
     def test_steps_forward_one(self):
-        assert player.next_index(["a", "b", "c"], "a") == 1
-        assert player.next_index(["a", "b", "c"], "b") == 2
+        assert player.step_index([0, 1, 2], 0, 1) == 1
+        assert player.step_index([0, 1, 2], 1, 1) == 2
+
+    def test_steps_backward_one(self):
+        assert player.step_index([0, 1, 2], 2, -1) == 1
+        assert player.step_index([0, 1, 2], 1, -1) == 0
 
     def test_wraps_at_the_end(self):
-        assert player.next_index(["a", "b", "c"], "c") == 0
+        assert player.step_index([0, 1, 2], 2, 1) == 0
 
-    def test_a_single_clip_is_its_own_successor(self):
-        assert player.next_index(["only.mkv"], "only.mkv") == 0
+    def test_wraps_at_the_beginning(self):
+        assert player.step_index([0, 1, 2], 0, -1) == 2
 
-    def test_an_unknown_clip_starts_at_the_top(self):
+    def test_a_single_clip_is_its_own_successor_and_predecessor(self):
+        assert player.step_index([0], 0, 1) == 0
+        assert player.step_index([0], 0, -1) == 0
+
+    def test_an_unknown_clip_starts_at_an_end(self):
         # Both cases that produce one: a build that loaded no file, and a clip
-        # that has since been removed from media/.
-        assert player.next_index(["a", "b"], "") == 0
-        assert player.next_index(["a", "b"], "gone.mkv") == 0
+        # since removed from media/. Next lands on the first card, previous on
+        # the last - the same courtesy in both directions.
+        assert player.step_index([0, 1, 2], None, 1) == 0
+        assert player.step_index([0, 1, 2], None, -1) == 2
+        assert player.step_index([0, 1, 2], 9, 1) == 0
+        assert player.step_index([0, 1, 2], 9, -1) == 2
 
-    def test_an_empty_playlist_has_no_next(self):
-        # None rather than 0: there is no row to load, and next_clip has to
-        # tell that apart from "load the first one".
-        assert player.next_index([], "a") is None
+    def test_an_empty_deck_has_no_next(self):
+        # None rather than 0: there is no card to turn over, and _step has to
+        # tell that apart from "play the first one".
+        assert player.step_index([], 0, 1) is None
+        assert player.step_index([], None, -1) is None
 
-    def test_a_repeated_path_takes_the_first_of_them(self):
-        # Two rows cannot really hold the same path - scan() walks a folder -
-        # but index() picking the first is the behaviour, so it is written down
-        # rather than left to be discovered.
-        assert player.next_index(["a", "b", "a"], "a") == 1
+    def test_follows_the_deck_and_not_the_table(self):
+        # The point of the whole function. In this deck the clip after
+        # playlist row 0 is row 1's neighbour in the *deck*, which is row 3.
+        assert player.step_index([2, 0, 3, 1], 0, 1) == 3
+        assert player.step_index([2, 0, 3, 1], 0, -1) == 2
+
+    def test_a_step_of_zero_stays_put(self):
+        assert player.step_index([0, 1, 2], 1, 0) == 1
+
+    def test_takes_any_sequence_not_only_a_list(self):
+        # play_order returns a list, but nothing should depend on that.
+        assert player.step_index((0, 1, 2), 0, 1) == 1
+
+
+class TestDeck:
+    def test_no_seed_is_the_playlists_own_order(self):
+        # What a launch starts in: the files play in the order they sit in
+        # media/ until somebody presses shuffle.
+        assert player.deck(4) == [0, 1, 2, 3]
+        assert player.deck(4, None) == [0, 1, 2, 3]
+
+    def test_a_seed_shuffles(self):
+        assert player.deck(20, 12345) != list(range(20))
+
+    def test_every_row_appears_exactly_once(self):
+        # The property that makes this a deck rather than repeated random
+        # draws: a clip cannot come up again until every other one has played.
+        # A shuffle that dropped or duplicated a row would show up here rather
+        # than as clips that mysteriously never play.
+        for seed in (None, 1, 12345, 999999):
+            assert sorted(player.deck(20, seed)) == list(range(20))
+
+    def test_the_same_seed_deals_the_same_deck(self):
+        # The reason a seed is stored rather than an order - a sequence that
+        # did something interesting can be replayed from the log.
+        assert player.deck(20, 4242) == player.deck(20, 4242)
+
+    def test_different_seeds_deal_different_decks(self):
+        assert player.deck(20, 1) != player.deck(20, 2)
+
+    def test_an_empty_playlist_deals_an_empty_deck(self):
+        assert player.deck(0) == []
+        assert player.deck(0, 12345) == []
+
+    def test_a_negative_count_is_not_a_negative_range(self):
+        assert player.deck(-1) == []
+
+    def test_one_clip_shuffles_to_itself(self):
+        assert player.deck(1, 12345) == [0]
+
+    def test_covers_the_playlist_it_was_measured_from(self):
+        paths = ["a", "b", "c", "d"]
+        assert sorted(paths[i] for i in player.deck(len(paths), 7)) == sorted(paths)
+
+
+class TestSeedAndShuffle:
+    """The seed is module state, so every test here puts it back.
+
+    Not a fixture on the class, because a test that failed halfway would
+    otherwise leave a shuffled deck behind for whatever ran next - which is
+    exactly the kind of order-dependent failure this suite should not be able
+    to produce.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_seed(self):
+        before = player.SEED
+        yield
+        player.SEED = before
+
+    @pytest.fixture(autouse=True)
+    def no_redraw(self, monkeypatch):
+        # _redraw reaches into TouchDesigner for the List COMP. The seed is
+        # what these tests are about.
+        monkeypatch.setattr(player, "_redraw", lambda: None)
+
+    def test_a_launch_starts_in_playlist_order(self):
+        # The default this project ships in, and the thing jms asked for
+        # explicitly: shuffle is a button, not a mode it boots into.
+        assert player.SEED is None
+
+    def test_play_order_follows_the_seed(self, silent):
+        assert player.play_order(6) == [0, 1, 2, 3, 4, 5]
+        player.set_seed(31337)
+        assert player.play_order(6) == player.deck(6, 31337)
+
+    def test_set_seed_none_restores_playlist_order(self, silent):
+        player.set_seed(31337)
+        player.set_seed(None)
+        assert player.play_order(6) == [0, 1, 2, 3, 4, 5]
+
+    def test_shuffle_picks_a_seed_and_reports_it(self, silent):
+        seed = player.shuffle()
+        assert player.SEED == seed
+        assert str(seed) in silent[-1]
+
+    def test_shuffle_actually_changes_the_order(self, silent):
+        player.shuffle()
+        assert player.play_order(20) != list(range(20))
+
+    def test_the_reported_seed_reproduces_the_order(self, silent):
+        seed = player.shuffle()
+        dealt = player.play_order(20)
+        player.set_seed(None)
+        player.set_seed(seed)
+        assert player.play_order(20) == dealt
+
+    def test_set_seed_takes_a_string_from_the_textport(self, silent):
+        player.set_seed("4242")
+        assert player.SEED == 4242
+
+    def test_playlist_order_says_so_rather_than_printing_none(self, silent):
+        player.set_seed(None)
+        assert "None" not in silent[-1]
 
 
 class TestClipPaths:
@@ -132,6 +261,26 @@ class TestCommand:
         player.command("rewind")
         for name in player.COMMANDS:
             assert name in silent[0]
+
+
+class TestCurrentIndex:
+    def test_finds_the_loaded_clip(self):
+        assert player.current_index(["a", "b", "c"], "b") == 1
+
+    def test_the_first_clip_is_zero_not_falsy_by_accident(self):
+        # 0 is a real answer here, which is the whole reason the "no answer"
+        # case below is None rather than 0.
+        assert player.current_index(["a", "b"], "a") == 0
+
+    def test_an_unknown_clip_is_none_not_the_top(self):
+        # Deliberately not next_index's answer to the same question. There, an
+        # unknown clip means "start at the top"; here it means "nothing is
+        # playing", and answering 0 would highlight a row that is not playing.
+        assert player.current_index(["a", "b"], "gone.mkv") is None
+        assert player.current_index(["a", "b"], "") is None
+
+    def test_an_empty_playlist_is_none(self):
+        assert player.current_index([], "a") is None
 
 
 class TestCurrentIndex:

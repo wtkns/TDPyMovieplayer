@@ -208,7 +208,11 @@ TRANSPORT_COMP = "transport"
 #: Button geometry, and the panel and window sized from it. Derived rather than
 #: three numbers separately maintained: a button width changed here moves the
 #: window edge with it instead of leaving a strip of dead panel.
-BUTTON_WIDTH = 240
+#:
+#: Narrowed from 240 when the row went from three buttons to five, which at the
+#: old width would have made the panel 1280 wide - and with it the clip list,
+#: whose two columns have nothing to do with that much space.
+BUTTON_WIDTH = 180
 BUTTON_HEIGHT = 160
 BUTTON_FONT_SIZE = 28
 PANEL_SPACING = 20
@@ -216,11 +220,23 @@ PANEL_SPACING = 20
 #: The buttons, in order: operator name, and the label drawn on it. The name is
 #: the load-bearing half - `tdpy.player.COMMANDS` is keyed on it, and the
 #: callback DAT dispatches on the name of whichever panel was clicked. Adding a
-#: control means a row here and a function there, and nothing else.
+#: control means a row here and a function there, and nothing else - which is
+#: what adding previous and shuffle actually cost, and the first real evidence
+#: that the dispatch was worth building instead of three wired buttons.
+#:
+#: Laid out as transport left to right with shuffle set apart at the end, since
+#: it is the one button that does not move the playhead: it changes what comes
+#: next and leaves the current clip playing.
+#:
+#: `previous` is labelled `prev` only because the label has to fit the button;
+#: the name is the half that has to match `player.COMMANDS`, and it is spelled
+#: out there.
 CONTROL_BUTTONS = (
+    ("previous", "prev"),
     ("play", "play"),
     ("pause", "pause"),
     ("next", "next"),
+    ("shuffle", "shuffle"),
 )
 
 #: Momentary, like the rebuild button: a click is a clean off-to-on edge rather

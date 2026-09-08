@@ -289,6 +289,30 @@ def refresh():
     return active
 
 
+def reset():
+    """Rebuild every row's text, then repaint the highlight.
+
+    For when the *order* changed rather than the clip - which today means the
+    shuffle button, and nothing else. The highlight follows the player's
+    `file` on its own, but a reshuffle moves every row while leaving `file`
+    exactly where it was, so nothing would otherwise fire.
+
+    Pulsing Reset re-runs the init callbacks, which is what re-reads the order
+    and rewrites the cells; `refresh` afterwards is for the scroll, since the
+    playing clip has very likely moved a long way up or down the list.
+    """
+    comp = _list_comp()
+    if comp is None:
+        return None
+
+    parameter = getattr(comp.par, "reset", None)
+    if parameter is None:
+        startup.report(f"[{startup.PACKAGE}] no reset parameter on {comp.path}")
+        return None
+    parameter.pulse()
+    return refresh()
+
+
 def _list_comp():
     """The List COMP, or None with a line saying why.
 
