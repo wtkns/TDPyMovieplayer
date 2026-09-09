@@ -315,6 +315,119 @@ def _menu_index(names, labels, wanted):
     return None
 
 
+#: Custom parameter kinds, and the Page method that appends each one. A table
+#: rather than building the method name from the kind, so a kind that is not
+#: real is refused with the list of real ones instead of raising an
+#: AttributeError from inside TouchDesigner's own class.
+CUSTOM_KINDS = {
+    "float": "appendFloat",
+    "int": "appendInt",
+    "toggle": "appendToggle",
+    "menu": "appendMenu",
+    "str": "appendStr",
+    "pulse": "appendPulse",
+    "file": "appendFile",
+    "folder": "appendFolder",
+    "rgb": "appendRGB",
+    "xy": "appendXY",
+    "op": "appendOP",
+}
+
+
+def custom_page(comp, name):
+    """A custom parameter page of that name, found on `comp` or created there.
+
+    Found first, because `appendCustomPage` appends unconditionally: calling it
+    on every build would leave a stack of identically named pages, each holding
+    a copy of the parameters, and the parameter dialog would show all of them.
+    """
+    for page in comp.customPages:
+        if page.name == name:
+            return page
+    return comp.appendCustomPage(name)
+
+
+def custom_par(comp, page, kind, name, label=None, **attributes):
+    """A custom parameter, created if it is missing. Returns (par, created).
+
+    **Created only when absent, never appended over.** `appendFloat` and its
+    siblings default to `replace=True`, documented as replacing the parameter
+    with fresh attributes - so a build that appended unconditionally would take
+    a value somebody was tuning back to its default on every rebuild. Appending
+    only what is not there is the whole of what makes a COMP of settings
+    something a build can converge onto rather than reset.
+
+    `attributes` are Par members spelled the way TouchDesigner spells them -
+    `default`, `min`, `max`, `clampMin`, `normMax`. They are applied on every
+    call, including to a parameter that already existed, so a range widened in
+    the source arrives with the next rebuild while the value stays where it was
+    put. Anything TouchDesigner refuses is reported rather than swallowed.
+
+    `val` is refused outright. A caller that has just created a parameter knows
+    to seed it - `created` is returned for exactly that - and a caller that did
+    not would be overwriting the value this function exists to preserve.
+    """
+    existing = getattr(comp.par, name, None)
+    parameter = existing
+
+    if parameter is None:
+        appender = getattr(custom_page(comp, page), CUSTOM_KINDS.get(kind, ""), None)
+        if appender is None:
+            report(
+                f"[{PACKAGE}] no custom parameter kind {kind!r}"
+                f" - have {', '.join(sorted(CUSTOM_KINDS))}"
+            )
+            return None, False
+        # A ParGroup comes back, one Par per value. Everything here is size 1,
+        # which is the default, so the group's first member is the parameter.
+        parameter = appender(name, label=label or name)[0]
+
+    for attribute, value in attributes.items():
+        if attribute == "val":
+            report(
+                f"[{PACKAGE}] {comp.path}.{name}: val is not a custom_par"
+                " attribute - seed a new parameter from its `created` flag"
+            )
+            continue
+        try:
+            setattr(parameter, attribute, value)
+        except (AttributeError, TypeError) as error:
+            report(f"[{PACKAGE}] {comp.path}.{name}.{attribute}: {error}")
+
+    return parameter, existing is None
+
+
+def bind(parameter, master):
+    """Bind `parameter` to `master`, so the two hold one value between them.
+
+    `master` is a **Par**, not an OP - a specific parameter on some other
+    operator, which becomes the one place the value lives. Writing either end
+    moves the other, which is the point: a slider dragged by hand, a value
+    typed into a Parameter COMP and a MIDI CC can all write the same setting
+    with nothing synchronising them.
+
+    **Both halves are required.** A `bindExpr` on a parameter still in Constant
+    mode is inert, and looks from the outside exactly like a binding that
+    failed - so the mode is set too, and the result is checked rather than
+    assumed. `bindMaster` answers a Par here despite the documentation
+    annotating it OP, so it is tested for None rather than for a type.
+    """
+    mode = td_enum("ParMode")
+    if mode is None:
+        return None
+
+    parameter.bindExpr = f"op({master.owner.path!r}).par.{master.name}"
+    parameter.mode = mode.BIND
+
+    if parameter.bindMaster is None:
+        report(
+            f"[{PACKAGE}] {parameter.owner.path}.{parameter.name} did not bind"
+            f" to {master.owner.path}.{master.name}"
+        )
+        return None
+    return parameter
+
+
 def reload():
     """Discard this package's modules and build again.
 

@@ -21,6 +21,15 @@ watching the player's `file` - so the list follows what is on screen rather
 than being told about it. See `tdpy/lister.py` for why that matters and why
 this is a List COMP rather than the palette's lister.
 
+Phase 4b puts the player's four settings on a `settings` COMP of their own as
+custom parameters, and the panel gained a band between the transport and the
+list showing them: a toggle or a slider each, and a Parameter COMP rendering
+all four as editable fields. Every one of those controls is *bound* to its
+parameter rather than wired to a callback, so the slider, the field and Phase
+7's MIDI are three views of one value with nothing synchronising them. The
+player's own `speed` is bound the same way. `tdpy/settings.py` holds what the
+settings are; this file only draws them.
+
 Parameter names here were looked up rather than guessed, with
 `py -3.11 -m scaffold.params moviefileinTOP` in the framework repository, which
 reads the help table TouchDesigner ships in its own `Config/`. Menu items are
@@ -70,6 +79,14 @@ FIRST_CLIP = 0
 #: below came to be read off the parameter rather than guessed. Either form
 #: works; the name is kept because it costs no translation and no log line.
 PLAY_MODE = "sequential"
+
+#: The COMP carrying the player's settings as custom parameters - what happens
+#: at the end of a file, where a clip starts, how long it is held, how fast it
+#: runs. Beside the build container rather than inside it, for the reason the
+#: windows are: `build()` destroys its own container, and a rebuild in the
+#: middle of tuning a dwell should not put the dwell back. `tdpy/settings.py`
+#: owns what is on it; this is only the name.
+SETTINGS_COMP = "settings"
 
 #: The Window COMP that puts `out` on a display. Created beside the build
 #: container rather than inside it - see _ensure_window for why.
@@ -245,6 +262,47 @@ CONTROL_BUTTONS = (
 #: rather than one toggle means neither shows the transport's actual state.
 CONTROL_BUTTON_TYPE = "momentary"
 
+#: The settings band: a row of toggles and sliders, and a Parameter COMP under
+#: it, between the transport and the clip list. Everything in it is a *view* of
+#: a parameter on SETTINGS_COMP rather than a control that decides anything -
+#: which is why none of these operators has a callback, and why adding a third
+#: writer later (a MIDI CC) needs nothing here changed.
+SETTINGS_ROW_COMP = "settingsRow"
+SETTINGS_ROW_HEIGHT = 100
+PARAMETER_COMP = "parameters"
+PARAMETER_HEIGHT = 170
+
+#: Toggle Down: on when pushed, off when pushed again. These are values, not
+#: actions, which is the whole difference between this row and the transport
+#: above it - a transport button *does* something and springs back, a toggle
+#: *is* something until it is changed.
+SETTINGS_TOGGLE_TYPE = "toggledown"
+
+#: Slider U - a horizontal slider tracking the u panel value. The other two are
+#: `sliderv` and `slideruv`; all three are named in the Slider COMP's help.
+SETTINGS_SLIDER_TYPE = "slideru"
+
+#: The toggles take a transport button's width, so the row lines up with the
+#: one above it; the sliders divide whatever is left.
+SETTINGS_TOGGLE_WIDTH = BUTTON_WIDTH
+
+#: The parameters mapping a slider's drag onto the setting's range.
+#:
+#: **Not in `Config/TDParameterHelp.json`** - that file's Slider COMP predates
+#: them and lists only `value0`, `value1` and the zone parameters. They are in
+#: the type stub TouchDesigner generates from the live operator, at
+#: `bin/Lib/tdi/ops/comps/sliderCOMP.py`, where their help reads "Help Not
+#: Available". So the names are read rather than guessed, but their behaviour
+#: is not documented anywhere and is confirmed on screen instead: drag dwell to
+#: the right-hand end and it should read 60, not 1.
+#:
+#: Without them the question would be open in a worse way. A slider's value0 is
+#: a panel position, and a panel position bound to a parameter whose range is
+#: 0-60 would write 0-1 into it and there would be nothing in the log to say
+#: that was what happened.
+SLIDER_RANGE_LOW = "valuerange0l"
+SLIDER_RANGE_HIGH = "valuerange0h"
+
 #: The Panel Execute DAT watching every button, and the shim it holds. One DAT
 #: for all three: `panelValue.owner` is the panel that was clicked, so the
 #: dispatch is a dictionary lookup in reloadable Python rather than three
@@ -355,7 +413,7 @@ def build():
     # imported from disk. From here they come off the td module instead.
     import td
 
-    from . import lister, startup
+    from . import lister, settings, startup
 
     parent = td.op(BUILD_PARENT) or td.op("/")
 
@@ -365,6 +423,12 @@ def build():
 
     _drop_legacy(parent)
 
+    # Before the container, and outside it. The player binds its speed to one
+    # of these parameters, and the panel binds four controls to them, so they
+    # have to exist before either is built - and they have to survive the
+    # destroy above, which is why they are not in the container at all.
+    configuration = settings.ensure(parent, td)
+
     # startup.create rather than parent.create throughout: the latter appends a
     # digit rather than fail when it will not use a name, and every name here is
     # referred to again - by the log, by the next phase, or by a wire.
@@ -373,10 +437,10 @@ def build():
 
     table = _place(startup.create(container, td.tableDAT, PLAYLIST_DAT), 0, 0)
     rows = _fill_playlist(table, td)
-    out = _add_player(container, rows, td)
+    out = _add_player(container, rows, configuration, td)
     _add_video_window(parent, out, td)
 
-    panel = _add_control_panel(parent, container, rows, td)
+    panel = _add_control_panel(parent, container, rows, configuration, td)
     _add_control_window(parent, panel, td)
 
     # After the panel exists and the player has its file, so the highlight is
@@ -513,8 +577,22 @@ def _add_control_window(parent, target, td):
     # effect on a window this build created: an already-open one keeps the size
     # it was opened at, which is the standing cost of converging onto a window
     # instead of rebuilding it. Changing the panel's geometry wants a restart.
+    was = None if created else (window.par.winw.eval(), window.par.winh.eval())
     startup.set_par(window, "winw", _panel_width())
     startup.set_par(window, "winh", _panel_height())
+    # Said out loud, because the symptom is a panel with its bottom cut off and
+    # nothing anywhere to explain it. Read off the parameters rather than the
+    # window, so it is the *change* that is reported: the launch after this one
+    # is silent even though the window it reopens is the right size for the
+    # first time. The panel has grown a row twice now, so this is the third
+    # time the cost of converging onto a window rather than rebuilding it has
+    # actually been paid.
+    if was is not None and was != (_panel_width(), _panel_height()):
+        startup.report(
+            f"[{startup.PACKAGE}] panel is now {_panel_width()}x{_panel_height()},"
+            f" window opened at {was[0]:g}x{was[1]:g}"
+            " - restart TouchDesigner to resize it"
+        )
     startup.set_par(window, "borders", True)
     # The one setting this window exists for, and off it would look exactly
     # like the activeViewer symptom the framework already has - a panel drawn
@@ -548,17 +626,37 @@ def _panel_width():
 
 
 def _panel_height():
-    """The panel's height: the button row, a gap, and the list under it.
+    """The panel's height: its four stacked rows, with a gap between each.
 
-    Derived for the same reason the width is. The window is sized from this,
-    so a taller list moves the window's bottom edge instead of being cut off
-    by it.
+    Derived for the same reason the width is, and as a list rather than a sum
+    of named constants so that adding a row is adding a row. The window is
+    sized from this, so a taller list moves the window's bottom edge instead of
+    being cut off by it.
     """
-    return BUTTON_HEIGHT + PANEL_SPACING + CLIP_LIST_HEIGHT
+    rows = (BUTTON_HEIGHT, SETTINGS_ROW_HEIGHT, PARAMETER_HEIGHT, CLIP_LIST_HEIGHT)
+    return sum(rows) + max(len(rows) - 1, 0) * PANEL_SPACING
 
 
-def _add_control_panel(parent, container, rows, td):
-    """The panel: a row of transport buttons, and the clip list beneath them.
+def _slider_width():
+    """How wide each settings slider is: the row, less the toggles and gaps.
+
+    The toggles take a fixed width so the row lines up with the transport above
+    it, and the sliders absorb whatever that leaves - so a button width changed
+    at the top of this file moves the sliders rather than opening a strip of
+    dead panel beside them.
+    """
+    from . import settings
+
+    count = len(settings.sliders())
+    if count <= 0:
+        return 0
+    fixed = len(settings.toggles()) * SETTINGS_TOGGLE_WIDTH
+    gaps = max(len(settings.SETTINGS) - 1, 0) * PANEL_SPACING
+    return max(_panel_width() - fixed - gaps, 0) // count
+
+
+def _add_control_panel(parent, container, rows, configuration, td):
+    """The panel: transport, the settings band, and the clip list beneath them.
 
     Destroyed and rebuilt on every build, unlike the window that shows it - so
     a button relabelled or a column added here arrives with a click of rebuild.
@@ -567,7 +665,8 @@ def _add_control_panel(parent, container, rows, td):
 
     `container` is the build container, needed only so the Parameter Execute
     DAT can be pointed at the player TOP inside it; `rows` is the scanned
-    playlist, needed only for its length.
+    playlist, needed only for its length; `configuration` is the settings COMP
+    the band's controls bind to.
     """
     from . import startup
 
@@ -589,6 +688,8 @@ def _add_control_panel(parent, container, rows, td):
     panel.activeViewer = True
 
     _add_transport(panel, td)
+    _add_settings_row(panel, configuration, td)
+    _add_parameters(panel, configuration, td)
     _add_clip_list(panel, container, rows, td)
 
     startup.report(
@@ -641,6 +742,129 @@ def _add_transport(panel, td):
     return transport
 
 
+def _add_settings_row(panel, configuration, td):
+    """Toggles and sliders for the four settings, each bound to its parameter.
+
+    **Nothing here has a callback.** A transport button is a shim into
+    `tdpy.player`, because pressing it *does* something; these are views of a
+    value, and binding is what makes a view. The consequence is the phase's
+    whole argument: a toggle clicked, a number typed into the Parameter COMP
+    below, and a MIDI CC at Phase 7 all write the same parameter, and none of
+    them has to tell the others.
+
+    A control whose parameter is missing is left unbound rather than skipped -
+    `settings.parameter()` has already said which one, and a slider that moves
+    nothing is a more legible symptom than a gap in the row.
+    """
+    from . import settings, startup
+
+    row = startup.create(panel, td.containerCOMP, SETTINGS_ROW_COMP)
+    row.nodeX, row.nodeY = 0, -200
+    startup.set_par(row, "w", _panel_width())
+    startup.set_par(row, "h", SETTINGS_ROW_HEIGHT)
+    startup.set_menu(row, "align", TRANSPORT_ALIGN)
+    startup.set_par(row, "spacing", PANEL_SPACING)
+    startup.set_par(row, "alignorder", 1)
+
+    for order, setting in enumerate(settings.SETTINGS):
+        if setting.kind == "toggle":
+            control = _add_settings_toggle(row, setting, td)
+        else:
+            control = _add_settings_slider(row, setting, td)
+        control.nodeX, control.nodeY = 0, -150 * order
+        startup.set_par(control, "h", SETTINGS_ROW_HEIGHT)
+        startup.set_par(control, "label", setting.label)
+        startup.set_par(control, "alignorder", order)
+
+        master = settings.parameter(configuration, setting.name)
+        if master is not None:
+            # value0 on both, and it means the same thing on both: the control's
+            # own value. Binding it to the setting is what makes the control a
+            # view rather than a second copy.
+            startup.bind(control.par.value0, master)
+
+    startup.report(
+        f"[{startup.PACKAGE}] settings row at {row.path}: "
+        + ", ".join(
+            setting.node
+            if setting.kind == "toggle"
+            else f"{setting.node} {setting.minimum:g}-{setting.maximum:g}"
+            for setting in settings.SETTINGS
+        )
+    )
+    return row
+
+
+def _add_settings_toggle(row, setting, td):
+    """One toggle button, sized to match a transport button above it."""
+    from . import startup
+
+    toggle = startup.create(row, td.buttonCOMP, setting.node)
+    startup.set_par(toggle, "w", SETTINGS_TOGGLE_WIDTH)
+    startup.set_menu(toggle, "buttontype", SETTINGS_TOGGLE_TYPE)
+    startup.set_par(toggle, "fontsize", BUTTON_FONT_SIZE * 0.6)
+    return toggle
+
+
+def _add_settings_slider(row, setting, td):
+    """One horizontal slider, its ends set to the setting's range.
+
+    The range is the part worth watching. `valuerange0l`/`valuerange0h` are
+    read off the type stub rather than the shipped parameter help, which does
+    not carry them, and their help text there is "Help Not Available" - so what
+    they do is confirmed by dragging one, not by having read it. If dwell tops
+    out at 1 rather than 60, this is the pair that did not do what their names
+    say.
+    """
+    from . import startup
+
+    slider = startup.create(row, td.sliderCOMP, setting.node)
+    startup.set_par(slider, "w", _slider_width())
+    startup.set_menu(slider, "slidertype", SETTINGS_SLIDER_TYPE)
+    startup.set_par(slider, SLIDER_RANGE_LOW, setting.minimum)
+    startup.set_par(slider, SLIDER_RANGE_HIGH, setting.maximum)
+    # Clamped at both ends, so a drag cannot put a value outside the range the
+    # slider draws. Typing a larger one into the Parameter COMP still can -
+    # the parameter itself is clamped only at the bottom.
+    startup.set_par(slider, "clampul", True)
+    startup.set_par(slider, "clampuh", True)
+    return slider
+
+
+def _add_parameters(panel, configuration, td):
+    """A Parameter COMP rendering the settings COMP's four custom parameters.
+
+    The typed half of the surface, and it is built in - which is the answer to
+    a gap the plan carried until the Phase 4b spike closed it. A Field COMP has
+    no value parameter to bind, only a panel value, and panel values can be
+    bind masters only; a Parameter COMP needs no binding at all, because it
+    edits the parameters themselves.
+
+    It draws each float as a slider *and* a numeric field, so the two halves of
+    "editable in the control panel" arrive together and correctly ranged. The
+    big sliders in the row above are the tactile version of the same values,
+    not the only way to reach them.
+    """
+    from . import startup
+
+    node = startup.create(panel, td.parameterCOMP, PARAMETER_COMP)
+    node.nodeX, node.nodeY = 0, -400
+    startup.set_par(node, "w", _panel_width())
+    startup.set_par(node, "h", PARAMETER_HEIGHT)
+    startup.set_par(node, "alignorder", 2)
+    if configuration is not None:
+        startup.set_par(node, "op", configuration.path)
+    startup.set_par(node, "custom", True)
+    # The built-in parameters of a base COMP are pages of clone, extension and
+    # external .tox settings - nothing to do with the player, and enough of
+    # them to bury the four that are.
+    startup.set_par(node, "builtin", False)
+    startup.set_par(node, "header", False)
+    startup.set_par(node, "pagenames", False)
+    startup.set_par(node, "labels", True)
+    return node
+
+
 def _add_clip_list(panel, container, rows, td):
     """The list of clips, and the DAT that keeps its highlight true.
 
@@ -653,14 +877,14 @@ def _add_clip_list(panel, container, rows, td):
     from . import lister, startup
 
     callbacks = startup.create(panel, td.textDAT, CLIP_LIST_CALLBACK_DAT)
-    callbacks.nodeX, callbacks.nodeY = 300, -200
+    callbacks.nodeX, callbacks.nodeY = 300, -600
     callbacks.text = CLIP_LIST_CALLBACK
 
     node = startup.create(panel, td.listCOMP, CLIP_LIST_COMP)
-    node.nodeX, node.nodeY = 0, -200
+    node.nodeX, node.nodeY = 0, -600
     startup.set_par(node, "w", _panel_width())
     startup.set_par(node, "h", CLIP_LIST_HEIGHT)
-    startup.set_par(node, "alignorder", 1)
+    startup.set_par(node, "alignorder", 3)
     startup.set_par(node, "callbacks", callbacks.path)
     # One more row than there are clips: row 0 is the header, and locking it
     # keeps it visible once the list is long enough to scroll.
@@ -703,7 +927,7 @@ def _add_clip_list_watch(panel, container, td):
         return None
 
     executor = startup.create(panel, td.parameterexecuteDAT, CLIP_LIST_EXEC_NAME)
-    executor.nodeX, executor.nodeY = 300, -400
+    executor.nodeX, executor.nodeY = 300, -750
     executor.text = CLIP_LIST_EXEC_CALLBACK
     startup.set_par(executor, "op", player.path)
     startup.set_par(executor, "pars", CLIP_LIST_WATCH_PAR)
@@ -730,14 +954,21 @@ def _pulse(operator, name):
     return parameter
 
 
-def _add_player(container, rows, td):
+def _add_player(container, rows, configuration, td):
     """One Movie File In TOP, playing, into a null.
 
     The null is not decoration. A Movie File In TOP is the operator most likely
     to be replaced - by a second one and a Switch TOP at Phase 6 - and anything
     connected to it directly would have to be rewired when that happens.
+
+    Its speed is **bound** to the settings COMP's Speed rather than set here,
+    which is the whole of what item 5 costs: a slider, a typed value and a MIDI
+    CC all reach the player through one parameter, and no code carries a number
+    from one to the other. Nothing else in this project may write `speed` on
+    the player - a binding is two-way, so a stray `set_par` would not be
+    overridden by the master, it would overwrite it.
     """
-    from . import playlist, startup
+    from . import playlist, settings, startup
 
     player = _place(
         startup.create(container, td.moviefileinTOP, PLAYER_TOP), 0, -200
@@ -752,7 +983,10 @@ def _add_player(container, rows, td):
     startup.set_par(player, "file", path)
     startup.set_menu(player, "playmode", PLAY_MODE)
     startup.set_par(player, "play", True)
-    startup.set_par(player, "speed", 1.0)
+
+    speed = settings.parameter(configuration, settings.SPEED)
+    if speed is not None:
+        startup.bind(player.par.speed, speed)
 
     # TOPs draw their image on the node when the viewer flag is set, which is
     # all "on screen" needs to mean at this phase. A perform window is a Phase 8

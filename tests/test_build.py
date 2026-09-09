@@ -103,3 +103,45 @@ class TestPanelWidth:
     def test_no_buttons_is_not_a_negative_width(self, monkeypatch):
         monkeypatch.setattr(build, "CONTROL_BUTTONS", ())
         assert build._panel_width() == 0
+
+
+class TestPanelHeight:
+    def test_gaps_fall_between_the_rows_and_not_below_the_last(self, monkeypatch):
+        monkeypatch.setattr(build, "BUTTON_HEIGHT", 100)
+        monkeypatch.setattr(build, "SETTINGS_ROW_HEIGHT", 50)
+        monkeypatch.setattr(build, "PARAMETER_HEIGHT", 60)
+        monkeypatch.setattr(build, "CLIP_LIST_HEIGHT", 200)
+        monkeypatch.setattr(build, "PANEL_SPACING", 10)
+        assert build._panel_height() == 100 + 50 + 60 + 200 + 30
+
+    def test_the_window_is_not_taller_than_the_display_it_opens_on(self):
+        # 1080 on a 1440-high panel, with a title bar to spare. Worth a test
+        # because the panel has grown twice now and each time by a whole row,
+        # and a window taller than its display is not obviously wrong on a
+        # machine with a 4K primary to open it on instead.
+        assert build._panel_height() <= 1400
+
+
+class TestSliderWidth:
+    def test_the_row_fills_the_panel_exactly(self):
+        # The sliders absorb what the toggles leave, so the row is the panel's
+        # width give or take the integer division - a strip of dead panel here
+        # is the symptom of getting the gap count wrong.
+        from tdpy import settings
+
+        used = (
+            len(settings.toggles()) * build.SETTINGS_TOGGLE_WIDTH
+            + len(settings.sliders()) * build._slider_width()
+            + (len(settings.SETTINGS) - 1) * build.PANEL_SPACING
+        )
+        assert build._panel_width() - used < len(settings.sliders())
+
+    def test_no_sliders_is_not_a_division_by_zero(self, monkeypatch):
+        from tdpy import settings
+
+        monkeypatch.setattr(settings, "SETTINGS", settings.toggles())
+        assert build._slider_width() == 0
+
+    def test_a_row_wider_than_the_panel_is_not_a_negative_width(self, monkeypatch):
+        monkeypatch.setattr(build, "SETTINGS_TOGGLE_WIDTH", 10_000)
+        assert build._slider_width() == 0
