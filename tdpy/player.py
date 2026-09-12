@@ -1,9 +1,7 @@
 """Transport - what the control panel's buttons actually do.
 
 Separate from `build.py` on purpose. That module describes a network and runs
-once; this one is called while the network is running, and is the file Phase 4
-grows into: `advance()` belongs here, beside `next_clip()`, drawing from a
-shuffled deck instead of walking the table in order.
+once; this one is called while the network is running.
 
 Every function here is callable from the textport with no arguments:
 
@@ -14,6 +12,17 @@ function call, and the thing that triggers it is a shim. The panel's buttons
 are one such shim today and a MIDI callback is another at Phase 7. Neither
 knows anything the other does not.
 
+**Phase 4c added two more shims and no new way of advancing.** The end-of-file
+watcher calls `on_loop()` and the dwell timer calls `on_dwell()`, and both of
+them read a setting and then call `next_clip()` or do nothing. There is
+therefore no `advance()` distinct from `next_clip()`, which the plan had
+expected: the deck already made the next clip a question with one answer, so a
+second entry point would have been a second name for the same call.
+
+`_step()` is the single funnel every clip change goes through, which is what
+lets the cue policy and the dwell restart live in one place and be inherited
+identically by all five triggers.
+
 Nothing is cached between calls. The operators are looked up by path every
 time, because `build()` destroys and recreates them and a reference captured
 at import would be pointing at a corpse after the first rebuild.
@@ -21,7 +30,7 @@ at import would be pointing at a corpse after the first rebuild.
 
 import random
 
-from . import build, startup
+from . import build, settings, startup
 
 #: The deck's seed, and the whole of this project's persistent runtime state.
 #:
@@ -43,12 +52,11 @@ from . import build, startup
 SEED = None
 
 
-def _ops():
-    """The player TOP and the playlist DAT, or (None, None) with a log line.
+def _container():
+    """The build container, or None with a line saying why.
 
-    One lookup for both, since no caller wants one without the other and a
-    missing container is the same failure either way - the build has not run,
-    or it failed and `startup.build()` already said so.
+    Looked up by path every time rather than held, for the reason in the module
+    docstring: `build()` destroys and recreates it.
     """
     import td
 
@@ -59,6 +67,18 @@ def _ops():
             f"[{startup.PACKAGE}] no {build.BUILD_ROOT} under {parent.path}"
             " - has the build run?"
         )
+    return container
+
+
+def _ops():
+    """The player TOP and the playlist DAT, or (None, None) with a log line.
+
+    One lookup for both, since no caller wants one without the other and a
+    missing container is the same failure either way - the build has not run,
+    or it failed and `startup.build()` already said so.
+    """
+    container = _container()
+    if container is None:
         return None, None
     return container.op(build.PLAYER_TOP), container.op(build.PLAYLIST_DAT)
 
@@ -118,6 +138,32 @@ def current_index(paths, current):
     if current in paths:
         return paths.index(current)
     return None
+
+
+def cue_fraction(random_cue, draw=None):
+    """Where a clip starts, as a fraction of its own length.
+
+    0.0 - the head of the clip - unless random cue is on, in which case a
+    fraction drawn across the whole of it. A **fraction** rather than a number
+    of seconds, which is what makes this answerable without knowing the
+    duration: the row whose length reads `--` because ffprobe could not open it
+    cues exactly as correctly as the rest.
+
+    **The draw is not constrained to the part of the clip that fits.** At speed
+    *s* and dwell *T* a clip consumes *s* x *T* seconds, so a cue point late in a
+    long clip will sometimes reach the end before the dwell expires - and that
+    is what the advance-at-end setting is for. Clamping the draw instead would
+    make the cue quietly depend on two other settings, and a random start that
+    is only random over part of the clip is the kind of thing nobody notices
+    being wrong.
+
+    `draw` is an argument so the random branch can be tested without patching
+    the module, and defaults to `random.random` - which answers [0.0, 1.0), so
+    a clip is never cued exactly to its own last frame.
+    """
+    if not random_cue:
+        return 0.0
+    return float((draw or random.random)())
 
 
 def deck(count, seed=None):
@@ -265,13 +311,43 @@ def _step(step):
     path = paths[index]
 
     startup.set_par(player, "file", path)
+    fraction = _cue(player)
     startup.set_par(player, "play", True)
+    # The clip changed, so the dwell is measured from here rather than from
+    # whenever the last cut happened to be. Without this the two advance
+    # triggers interfere: a clip that ended early would be followed by one held
+    # for whatever was left of the dwell.
+    restart_dwell()
     # The position in the deck, not the row in the table - once shuffled, the
     # table row is not the number anyone watching the panel is looking at.
     startup.report(
-        f"[{startup.PACKAGE}] clip {order.index(index) + 1}/{len(order)}: {path}"
+        f"[{startup.PACKAGE}] clip {order.index(index) + 1}/{len(order)}"
+        f" at {fraction:.0%}: {path}"
     )
     return path
+
+
+def _cue(player):
+    """Put the clip's start point on the player and jump to it. Returns it.
+
+    Here rather than in each caller, so next, previous, the dwell timer, the
+    end-of-file watcher and Phase 7's MIDI all inherit one cue policy instead of
+    each applying their own. `_step` is the single funnel every clip change goes
+    through, which is what makes one place possible.
+
+    The unit is set once at build time - `cuepointunit` is Fraction - so this
+    writes a number between 0 and 1 and never touches a menu.
+
+    **Worth checking on screen:** the pulse is fired in the same frame the
+    `file` parameter is written, and a Movie File In TOP does not open the new
+    file until it cooks. If the cue lands on the outgoing clip for a frame, or
+    does not take at all, the fix is to defer the pulse one frame rather than to
+    change what is cued.
+    """
+    fraction = cue_fraction(settings.value(settings.RANDOM_CUE))
+    startup.set_par(player, "cuepoint", fraction)
+    build.pulse(player, "cuepulse")
+    return fraction
 
 
 def next_clip():
@@ -282,6 +358,118 @@ def next_clip():
 def previous_clip():
     """Load the previous card of the deck and play it."""
     return _step(-1)
+
+
+def dwell_timer():
+    """The Timer CHOP counting out the dwell, or None with a line about it.
+
+    Inside the build container, unlike the settings COMP: the dwell *value* has
+    to survive a rebuild and the dwell *clock* does not.
+    """
+    container = _container()
+    if container is None:
+        return None
+    timer = container.op(build.DWELL_TIMER_CHOP)
+    if timer is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.DWELL_TIMER_CHOP} in"
+            f" {container.path} - nothing will advance on the dwell"
+        )
+    return timer
+
+
+def restart_dwell():
+    """Put the dwell clock back to zero. Called whenever the clip changes.
+
+    `masterSeconds` is the Timer CHOP's own clock, documented as counting from
+    0 from a Start and settable directly from Python - so this is the whole of a
+    restart, with no Initialize-then-Start sequence to get the timing of.
+    """
+    timer = dwell_timer()
+    if timer is None:
+        return None
+    timer.masterSeconds = 0
+    return timer
+
+
+def on_loop():
+    """The clip reached its end and wrapped. Advance, or leave it looping.
+
+    Called by the CHOP Execute DAT watching `loop_frame` on the player's Info
+    CHOP. The player's Extend Right is Cycle permanently, so looping is what a
+    clip does when it runs out and this decides only whether that is the end of
+    it - both behaviours come from one network and one toggle.
+
+    Worth knowing: with random cue on, a clip cued close to its own end reaches
+    that end almost immediately, so advance-at-end can cut within a second of a
+    cut. That is the overrun the cue deliberately does not clamp away, arriving
+    where it was meant to.
+    """
+    if not settings.value(settings.ADVANCE_ON_END):
+        return None
+    return next_clip()
+
+
+def on_dwell(cycle):
+    """A dwell cycle began. Advance, unless this is the timer starting.
+
+    Called by the Timer CHOP's `onCycleStart`, which passes the cycle index -
+    documented in the install's own callbacks file, and as `outcycle`: "the
+    number of cycles completed ... starting with 0 during the entire first
+    cycle." So index 0 beginning is the timer being started, not a dwell that
+    expired, and advancing on it would cut a clip the instant it was loaded.
+
+    The guard is written against the index rather than against a flag this
+    module sets, so it holds however the timer was started - by the build, by a
+    clip change, or by a hand on the parameter.
+
+    The dwell is re-read as well. The timer's Play follows the setting through
+    `on_dwell_change`, and those two can disagree for the frame between a
+    slider reaching 0 and the watcher running; the setting is the one that is
+    right.
+    """
+    if cycle < 1:
+        return None
+    if settings.value(settings.DWELL) <= 0:
+        return None
+    return next_clip()
+
+
+def on_dwell_change():
+    """Start or stop the dwell timer to match the Dwell setting.
+
+    **A dwell of 0 is the timer off, not a cut every frame**, which makes the
+    bottom of the slider a real mode rather than an accident. That is an
+    interpretation of the value rather than a view of it, so it cannot be a
+    binding - a binding mirrors a number and has no opinion about what 0 means.
+    A Parameter Execute DAT watching Dwell calls this instead, which is the same
+    shape as the clip list following the player's `file`.
+
+    The previous state is read off the timer rather than remembered here, and it
+    decides two things. The clock is restarted only when the timer is being
+    turned *on*, so nudging a running dwell from 4 to 5 does not postpone the
+    cut every time the slider moves - which would make a dwell impossible to
+    reach by dragging. And the line is logged only when the mode actually
+    changed, so dragging the slider does not fill the launch log with a record
+    of the drag.
+    """
+    timer = dwell_timer()
+    if timer is None:
+        return None
+
+    dwell = settings.value(settings.DWELL)
+    running = dwell > 0
+    was_running = bool(timer.par.play.eval())
+
+    startup.set_par(timer, "play", running)
+    if running and not was_running:
+        restart_dwell()
+    if running != was_running:
+        startup.report(
+            f"[{startup.PACKAGE}] dwell timer "
+            + (f"running, {dwell:g}s" if running else "off")
+        )
+    return timer
 
 
 def _redraw():

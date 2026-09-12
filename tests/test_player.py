@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from tdpy import player, startup  # noqa: E402
+from tdpy import player, settings, startup  # noqa: E402
 
 
 class Cell:
@@ -324,3 +324,192 @@ class TestPlayOrder:
         paths = ["a", "b", "c", "d"]
         order = player.play_order(len(paths))
         assert [paths[i] for i in order] == paths
+
+
+class FakePar:
+    """A Par as far as this code uses one: a value, read two ways.
+
+    `.val` is what `startup.set_par` writes and `.eval()` is what `on_dwell_
+    change` reads, and they are the same number here - which is true of an
+    unbound parameter and is the case being tested.
+    """
+
+    def __init__(self, val):
+        self.val = val
+
+    def eval(self):
+        return self.val
+
+
+class FakeTimerPars:
+    """The one parameter the dwell reads and writes."""
+
+    def __init__(self, play):
+        self.play = FakePar(play)
+
+
+class FakeTimer:
+    """A Timer CHOP as far as the dwell needs one: a Play par and a clock.
+
+    `masterSeconds` starts at something other than 0 so a test can tell a
+    restart from a timer that happened to be there already.
+    """
+
+    path = "/project1/generated/dwell"
+
+    def __init__(self, play=0):
+        self.par = FakeTimerPars(play)
+        self.masterSeconds = 99.0
+
+
+@pytest.fixture
+def setting(monkeypatch):
+    """The settings a decision reads, without a settings COMP to read them off.
+
+    Defaults are the launch defaults from `settings.SETTINGS`, so a test that
+    changes nothing is testing the behaviour of a fresh launch. Returns the dict
+    for a test to alter.
+    """
+    values = {
+        settings.ADVANCE_ON_END: True,
+        settings.RANDOM_CUE: False,
+        settings.DWELL: 0.0,
+        settings.SPEED: 1.0,
+    }
+    monkeypatch.setattr(settings, "value", values.get)
+    return values
+
+
+@pytest.fixture
+def advanced(monkeypatch):
+    """Record calls to next_clip instead of reaching for a player TOP."""
+    calls = []
+    monkeypatch.setattr(player, "next_clip", lambda: calls.append("next"))
+    return calls
+
+
+class TestCueFraction:
+    """Where a clip starts. A fraction, so it needs no duration to be right."""
+
+    def test_off_is_the_head_of_the_clip(self):
+        assert player.cue_fraction(False) == 0.0
+
+    def test_on_draws_a_fraction(self):
+        assert player.cue_fraction(True, draw=lambda: 0.42) == 0.42
+
+    def test_off_does_not_draw_at_all(self):
+        # Not just "returns 0" - nothing is consumed from the random stream, so
+        # a launch with random cue off is reproducible clip for clip.
+        def refuse():
+            raise AssertionError("drew a cue point with random cue off")
+
+        assert player.cue_fraction(False, draw=refuse) == 0.0
+
+    def test_the_default_draw_stays_inside_the_clip(self):
+        # random.random answers [0.0, 1.0), so a clip is never cued to exactly
+        # its own end - which with Extend Right on Cycle would loop instantly.
+        for _ in range(200):
+            fraction = player.cue_fraction(True)
+            assert 0.0 <= fraction < 1.0
+
+    def test_a_falsy_setting_is_off(self):
+        # settings.value answers a float for a toggle read through eval(), so
+        # 0.0 has to mean off as surely as False does.
+        assert player.cue_fraction(0.0) == 0.0
+        assert player.cue_fraction(1.0, draw=lambda: 0.7) == 0.7
+
+
+class TestOnLoop:
+    """The end-of-file policy: one toggle over a player that always loops."""
+
+    def test_advances_when_advance_at_end_is_on(self, setting, advanced):
+        player.on_loop()
+        assert advanced == ["next"]
+
+    def test_leaves_the_clip_looping_when_it_is_off(self, setting, advanced):
+        setting[settings.ADVANCE_ON_END] = False
+        player.on_loop()
+        assert advanced == []
+
+    def test_the_launch_default_advances(self, setting, advanced):
+        # The one automatic behaviour that is on at launch, because with no
+        # timer running and nothing pressed, nothing else would ever advance.
+        assert setting[settings.ADVANCE_ON_END] is True
+        player.on_loop()
+        assert advanced == ["next"]
+
+
+class TestOnDwell:
+    """The dwell policy, including the cycle that is the timer starting."""
+
+    def test_the_first_cycle_beginning_is_not_a_dwell(self, setting, advanced):
+        # Cycle index 0 is the timer being started. Advancing on it would cut a
+        # clip the instant it was loaded, because _step restarts the clock.
+        setting[settings.DWELL] = 5.0
+        player.on_dwell(0)
+        assert advanced == []
+
+    def test_a_later_cycle_advances(self, setting, advanced):
+        setting[settings.DWELL] = 5.0
+        player.on_dwell(1)
+        player.on_dwell(7)
+        assert advanced == ["next", "next"]
+
+    def test_a_dwell_of_zero_advances_nothing(self, setting, advanced):
+        # The timer's Play is off at 0 so this should not be reached at all;
+        # the setting is re-read because the two can disagree for the frame
+        # between a slider reaching 0 and the watcher running.
+        setting[settings.DWELL] = 0.0
+        player.on_dwell(3)
+        assert advanced == []
+
+    def test_a_negative_cycle_is_refused_like_zero(self, setting, advanced):
+        setting[settings.DWELL] = 5.0
+        player.on_dwell(-1)
+        assert advanced == []
+
+
+class TestOnDwellChange:
+    """Following the Dwell setting with the timer's Play, and nothing else."""
+
+    @pytest.fixture
+    def timer(self, monkeypatch):
+        node = FakeTimer()
+        monkeypatch.setattr(player, "dwell_timer", lambda: node)
+        return node
+
+    def test_a_dwell_above_zero_starts_the_timer(self, setting, timer, silent):
+        setting[settings.DWELL] = 4.0
+        player.on_dwell_change()
+        assert timer.par.play.val is True
+        assert timer.masterSeconds == 0
+
+    def test_a_dwell_of_zero_stops_it(self, setting, timer, silent):
+        timer.par.play.val = True
+        setting[settings.DWELL] = 0.0
+        player.on_dwell_change()
+        assert timer.par.play.val is False
+
+    def test_an_already_running_timer_keeps_its_clock(self, setting, timer, silent):
+        # The reason the previous state is read rather than assumed: nudging a
+        # running dwell from 4 to 5 must not postpone the cut, or a dwell could
+        # never be reached by dragging the slider.
+        timer.par.play.val = True
+        setting[settings.DWELL] = 5.0
+        player.on_dwell_change()
+        assert timer.masterSeconds == 99.0
+
+    def test_only_a_change_of_mode_is_logged(self, setting, timer, silent):
+        setting[settings.DWELL] = 4.0
+        player.on_dwell_change()
+        assert len(silent) == 1
+        # Second call changes nothing, so it says nothing - otherwise dragging
+        # the slider would fill a log kept for launches with a record of a drag.
+        player.on_dwell_change()
+        assert len(silent) == 1
+
+    def test_a_missing_timer_is_not_an_exception(self, setting, monkeypatch):
+        # `dwell_timer` has already said which node is missing; this only has to
+        # not take the Parameter Execute callback down with it.
+        monkeypatch.setattr(player, "dwell_timer", lambda: None)
+        assert player.on_dwell_change() is None
