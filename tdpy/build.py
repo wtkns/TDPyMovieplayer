@@ -263,7 +263,7 @@ LEGACY_NAMES = ("window", "bindSpike", "bindSpikeWindow")
 #:
 #: So on this machine's three displays the valid values are 0, 1 and 2: the 4K
 #: primary, and the two 2560x1440 panels beside it.
-VIDEO_WINDOW_DISPLAY = 2
+VIDEO_WINDOW_DISPLAY = 1
 
 #: Positioning is relative to whatever area this names, and a display number
 #: only means anything when that area is a specified display rather than the
@@ -337,7 +337,7 @@ CONTROL_WINDOW_COMP = "controlPanelWindow"
 #: Zero-based, like VIDEO_WINDOW_DISPLAY - this was written as 3 first, on the
 #: assumption that three displays are numbered 1, 2, 3, and the window opened
 #: somewhere it had not been asked for rather than refusing.
-CONTROL_WINDOW_DISPLAY = 1
+CONTROL_WINDOW_DISPLAY = 0
 
 #: Opening Size for the panel window. Custom, with the size below - a bounded
 #: window, deliberately not exclusive. It is a thing to be clicked while other
@@ -449,6 +449,67 @@ SETTINGS_TOGGLE_WIDTH = BUTTON_WIDTH
 #: that was what happened.
 SLIDER_RANGE_LOW = "valuerange0l"
 SLIDER_RANGE_HIGH = "valuerange0h"
+
+#: The diagnostics strip: one Text COMP per player, reading that player's Info
+#: CHOP, at the bottom of the control panel. Built 2026-09-12 because the frames
+#: being dropped at a cut had two plausible causes and no measurement.
+#:
+#: **Every channel below is a real Movie File In TOP channel**, and establishing
+#: that took more than grepping `libTD.dll`. The obvious name for the symptom,
+#: `dropped_frames`, *is* in the binary - and belongs to the Video Device Out
+#: TOP. The Movie File In TOP's own list is on `Point_File_In_TOP.htm` in the
+#: install's OfflineHelp, which enumerates the shared file-reading channel set
+#: (it contains `loop_frame`, which is how it was identified as the right list);
+#: the Movie File In TOP's page names them only in prose. So the binary says a
+#: name exists somewhere and the help says which operator it is on, and this
+#: needed both.
+#:
+#: `pre_read_misses` is the one that answers the question. The read-ahead
+#: failing to keep up is precisely what a random cue into the middle of a long
+#: GOP causes, and it counts the event rather than its symptom.
+DIAGNOSTICS_COMP = "diagnostics"
+DIAGNOSTICS_HEIGHT = 90
+DIAGNOSTICS_FONT_SIZE = 20
+
+#: Channel, label, and how many decimals to draw. Kept as one table so adding a
+#: reading is a row here and nothing else - the same shape as CONTROL_BUTTONS
+#: and settings.SETTINGS.
+#:
+#: `hardware_decode` is first because it is the one that says whether the Nvidia
+#: decoder is being used at all; its help notes it "does nothing for Hap and
+#: NotchLC codecs, which are always hardware decoded", so on this project's
+#: H.264 media a 0 here is a real finding rather than a formality.
+DIAGNOSTIC_CHANNELS = (
+    ("hardware_decode", "hw", 0),
+    ("pre_read_misses", "miss", 0),
+    ("num_pre_read_frames", "buf", 0),
+    ("last_frame_decode_time", "dec", 1),
+    ("last_gpu_upload_time", "gpu", 1),
+    ("has_decode_errors", "err", 0),
+)
+
+
+def _diagnostics_expression(label, info_path):
+    """The Text COMP `text` expression for one player. Returns the string.
+
+    **The channels are named in the expression rather than read by a function
+    it calls**, and that is not a style preference. TouchDesigner tracks a
+    parameter expression's dependencies by what the expression references, so a
+    tidier `tdpy.player.diagnostics()` reading the same CHOPs inside itself
+    would leave the readout to cook whenever it felt like it - which for a
+    diagnostic is worse than not having one, because a stale number reads as a
+    measurement.
+
+    An f-string, because a parameter expression is an ordinary Python
+    expression. The path is baked in at build time from the Info CHOP's real
+    `path`, so nothing here depends on where the network was built.
+    """
+    parts = " ".join(
+        f"{name} {{op({info_path!r})[{channel!r}]:.{places}f}}"
+        for channel, name, places in DIAGNOSTIC_CHANNELS
+    )
+    return f'f"{label}  {parts}"'
+
 
 #: The Panel Execute DAT watching every button, and the shim it holds. One DAT
 #: for all three: `panelValue.owner` is the panel that was clicked, so the
@@ -831,6 +892,21 @@ def _add_video_window(parent, target, td):
     window.nodeX, window.nodeY = -250, -300
     startup.set_menu(window, "size", WINDOW_SIZE)
 
+    # Claim F1. The Perform Window is a *project* setting living in the Window
+    # Placement dialog rather than a property of any window, so a project with
+    # two Window COMPs and no opinion gets whichever one the dialog already
+    # named - which is how F1 came to open the control panel.
+    #
+    # Pulsed on every build rather than only on the launch that created the
+    # window, because the setting is not this window's to hold: anything else
+    # can take it, and a rebuild is the project restating what it wants. That
+    # is the same argument as the build being clear-and-rebuild at all.
+    #
+    # It also makes the .toe saved on 2026-09-12 redundant rather than
+    # load-bearing. Setting this by hand and saving worked, but it put project
+    # state in the one file this project keeps disposable.
+    pulse(window, "setperform")
+
     # Only on the launch that created it. Pulsing winopen on every rebuild
     # would reopen a window that is already open, and with an exclusive display
     # that is a mode change rather than a no-op.
@@ -914,7 +990,13 @@ def _panel_height():
     sized from this, so a taller list moves the window's bottom edge instead of
     being cut off by it.
     """
-    rows = (BUTTON_HEIGHT, SETTINGS_ROW_HEIGHT, PARAMETER_HEIGHT, CLIP_LIST_HEIGHT)
+    rows = (
+        BUTTON_HEIGHT,
+        SETTINGS_ROW_HEIGHT,
+        PARAMETER_HEIGHT,
+        CLIP_LIST_HEIGHT,
+        DIAGNOSTICS_HEIGHT,
+    )
     return sum(rows) + max(len(rows) - 1, 0) * PANEL_SPACING
 
 
@@ -972,6 +1054,7 @@ def _add_control_panel(parent, container, rows, configuration, td):
     _add_settings_row(panel, configuration, td)
     _add_parameters(panel, configuration, td)
     _add_clip_list(panel, container, rows, td)
+    _add_diagnostics(panel, container, td)
 
     startup.report(
         f"[{startup.PACKAGE}] control panel at {panel.path}:"
@@ -979,6 +1062,69 @@ def _add_control_panel(parent, container, rows, configuration, td):
         f" over {len(rows)} clip(s)"
     )
     return panel
+
+
+def _add_diagnostics(panel, container, td):
+    """A line per player of what its decoder is actually doing. Returns the row.
+
+    Built because the stutter at a cut had two plausible causes - a decode that
+    could not keep up, or the desktop compositor dropping frames outside a
+    full-screen exclusive Perform Window - and arguing about which was cheaper
+    than measuring, right up until it wasn't. The Info CHOPs were already there
+    from Phase 4c, publishing all of this and read by nothing.
+
+    **Every reading is an expression over a channel, so nothing pushes here.**
+    Same rule as the clip list's highlight and the Cross TOP's value: the thing
+    that knows is the operator, and the display asks it. A diagnostic is the
+    worst possible place to break that rule, because a stale number does not
+    look broken - it looks like a measurement.
+
+    Two Text COMPs rather than one, because the two players are in different
+    states at any moment and averaging them would hide the case that matters:
+    the hidden player opening a new file while the visible one plays.
+    """
+    from . import startup
+
+    row = startup.create(panel, td.containerCOMP, DIAGNOSTICS_COMP)
+    row.nodeX, row.nodeY = 0, -900
+    startup.set_par(row, "w", _panel_width())
+    startup.set_par(row, "h", DIAGNOSTICS_HEIGHT)
+    startup.set_menu(row, "align", TRANSPORT_ALIGN)
+    startup.set_par(row, "spacing", PANEL_SPACING)
+    # After the clip list, which is alignorder 3 - so this sits at the bottom
+    # and the list keeps the position it has had since Phase 5a.
+    startup.set_par(row, "alignorder", 4)
+
+    width = max(
+        (_panel_width() - PANEL_SPACING * (len(PLAYER_TOPS) - 1)) // len(PLAYER_TOPS),
+        0,
+    )
+    mode = startup.td_enum("ParMode")
+    readouts = []
+    for index, (name, info_name) in enumerate(zip(PLAYER_TOPS, PLAYER_INFO_CHOPS)):
+        info = container.op(info_name)
+        if info is None:
+            startup.report(
+                f"[{startup.PACKAGE}] no {info_name} - {name} has no diagnostics"
+            )
+            continue
+
+        readout = startup.create(row, td.textCOMP, f"{DIAGNOSTICS_COMP}_{name}")
+        readout.nodeX, readout.nodeY = index * 200, -900
+        startup.set_par(readout, "w", width)
+        startup.set_par(readout, "h", DIAGNOSTICS_HEIGHT)
+        startup.set_par(readout, "fontsize", DIAGNOSTICS_FONT_SIZE)
+        startup.set_par(readout, "alignorder", index)
+        if mode is not None:
+            readout.par.text.expr = _diagnostics_expression(name, info.path)
+            readout.par.text.mode = mode.EXPRESSION
+        readouts.append(readout)
+
+    startup.report(
+        f"[{startup.PACKAGE}] diagnostics at {row.path}: "
+        + ", ".join(name for _, name, _ in DIAGNOSTIC_CHANNELS)
+    )
+    return row
 
 
 def _add_transport(panel, td):

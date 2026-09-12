@@ -67,6 +67,23 @@ only be an invalidation bug waiting to happen. If ffprobe
 cannot be found the playlist is still built, with every duration reading 0 and a
 line in the log saying why.
 
+## Diagnostics
+
+The control panel's bottom strip shows, per player, what its decoder is
+actually doing: whether the Nvidia hardware decoder is engaged
+(`hardware_decode`), how often the read-ahead failed to keep up
+(`pre_read_misses`), how many frames are buffered, and the decode and GPU upload
+times for the last frame. Every reading is an expression over that player's Info
+CHOP, so it is a live pull rather than something the code remembers to update.
+
+`pre_read_misses` is the number to watch. This player cues to a random point on
+every cut, and with long-GOP media — H.264 with sparse keyframes — reaching an
+arbitrary point means decoding forward from the preceding keyframe. That is the
+one thing this design asks of a codec that H.264 is worst at, and a rising miss
+count is what it looks like. `hardware_decode` reading 0 on H.264 media is worth
+knowing too; the `Hardware Decode` parameter does nothing for Hap and NotchLC,
+which are always hardware decoded, which is one argument for re-encoding.
+
 ## Tests
 
 The playlist scan is plain Python over plain files, so it is tested outside

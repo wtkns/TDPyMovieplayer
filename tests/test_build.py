@@ -106,18 +106,42 @@ class TestPanelWidth:
 
 
 class TestPanelHeight:
+    #: The row heights `_panel_height` sums, named here so this test knows what
+    #: the panel is made of without restating how many rows that is. Adding a
+    #: row means adding a name to this tuple and nothing else - the previous
+    #: version of these tests wrote the arithmetic out longhand and broke the
+    #: moment the diagnostics strip arrived, which is the failure this avoids.
+    ROW_HEIGHTS = (
+        "BUTTON_HEIGHT",
+        "SETTINGS_ROW_HEIGHT",
+        "PARAMETER_HEIGHT",
+        "CLIP_LIST_HEIGHT",
+        "DIAGNOSTICS_HEIGHT",
+    )
+
     def test_gaps_fall_between_the_rows_and_not_below_the_last(self, monkeypatch):
-        monkeypatch.setattr(build, "BUTTON_HEIGHT", 100)
-        monkeypatch.setattr(build, "SETTINGS_ROW_HEIGHT", 50)
-        monkeypatch.setattr(build, "PARAMETER_HEIGHT", 60)
-        monkeypatch.setattr(build, "CLIP_LIST_HEIGHT", 200)
+        # Every row 100 and every gap 10, so the answer is readable: n rows and
+        # n-1 gaps. A gap below the last row is the bug this catches, and it
+        # shows up as the panel being exactly one spacing too tall.
+        for name in self.ROW_HEIGHTS:
+            monkeypatch.setattr(build, name, 100)
         monkeypatch.setattr(build, "PANEL_SPACING", 10)
-        assert build._panel_height() == 100 + 50 + 60 + 200 + 30
+        count = len(self.ROW_HEIGHTS)
+        assert build._panel_height() == count * 100 + (count - 1) * 10
+
+    def test_it_sums_every_row_the_panel_actually_has(self, monkeypatch):
+        # Guards the list above against the module moving on without it. Each
+        # row is given a distinct height, so a row left out of `_panel_height`
+        # or missing from ROW_HEIGHTS changes the total.
+        for index, name in enumerate(self.ROW_HEIGHTS):
+            monkeypatch.setattr(build, name, 2 ** index)
+        monkeypatch.setattr(build, "PANEL_SPACING", 0)
+        assert build._panel_height() == 2 ** len(self.ROW_HEIGHTS) - 1
 
     def test_the_window_is_not_taller_than_the_display_it_opens_on(self):
         # 1080 on a 1440-high panel, with a title bar to spare. Worth a test
-        # because the panel has grown twice now and each time by a whole row,
-        # and a window taller than its display is not obviously wrong on a
+        # because the panel has grown three times now and each time by a whole
+        # row, and a window taller than its display is not obviously wrong on a
         # machine with a 4K primary to open it on instead.
         assert build._panel_height() <= 1400
 
@@ -145,3 +169,70 @@ class TestSliderWidth:
     def test_a_row_wider_than_the_panel_is_not_a_negative_width(self, monkeypatch):
         monkeypatch.setattr(build, "SETTINGS_TOGGLE_WIDTH", 10_000)
         assert build._slider_width() == 0
+
+
+class TestDiagnosticsExpression:
+    """The readout's text, which is a Python expression TouchDesigner evaluates.
+
+    Worth testing at a prompt precisely because its failure mode in the app is
+    quiet: a malformed expression leaves the parameter in error and the strip
+    blank, which looks like a player with nothing to report rather than like a
+    broken readout.
+    """
+
+    PATH = "/project1/generated/playerAInfo"
+
+    def test_it_is_a_valid_python_expression(self):
+        # The whole point. compile() in eval mode is the same parse
+        # TouchDesigner will do, run somewhere the failure is visible.
+        expression = build._diagnostics_expression("playerA", self.PATH)
+        compile(expression, "<expr>", "eval")
+
+    def test_it_evaluates_to_the_line_it_promises(self):
+        # Evaluated against a stand-in `op` so the formatting is checked rather
+        # than assumed - the f-string nesting here is easy to get subtly wrong
+        # and impossible to see wrong in a screenshot.
+        expression = build._diagnostics_expression("playerA", self.PATH)
+        channels = {
+            "hardware_decode": 1.0,
+            "pre_read_misses": 3.0,
+            "num_pre_read_frames": 12.0,
+            "last_frame_decode_time": 4.25,
+            "last_gpu_upload_time": 0.5,
+            "has_decode_errors": 0.0,
+        }
+        result = eval(expression, {"op": lambda path: channels})
+        assert result == (
+            "playerA  hw 1 miss 3 buf 12 dec 4.2 gpu 0.5 err 0"
+        )
+
+    def test_it_names_the_info_chop_it_was_given(self):
+        # The dependency TouchDesigner tracks. If the path stopped appearing in
+        # the expression the readout would cook when it felt like it, and a
+        # stale diagnostic is worse than none.
+        expression = build._diagnostics_expression("playerB", self.PATH)
+        assert expression.count(self.PATH) == len(build.DIAGNOSTIC_CHANNELS)
+
+    def test_every_channel_is_named(self):
+        expression = build._diagnostics_expression("playerA", self.PATH)
+        for channel, _, _ in build.DIAGNOSTIC_CHANNELS:
+            assert channel in expression
+
+    def test_the_channels_are_movie_file_in_top_channels(self):
+        # `dropped_frames` is in libTD.dll and belongs to the Video Device Out
+        # TOP, not to this one - it was the obvious name for the symptom and
+        # would have been a channel that is simply not there. The list below is
+        # from Point_File_In_TOP.htm, which enumerates the shared file-reading
+        # channel set that Movie File In TOP's own page gives only in prose.
+        published = {
+            "loop_frame", "pre_read_misses", "last_pre_read_miss_wait",
+            "hard_drive_timeouts", "num_pre_read_frames", "first_index_to_read",
+            "last_frame_hd_read_time", "last_frame_decode_time",
+            "last_gpu_upload_time", "open", "opening", "open_failed",
+            "fully_pre_read", "true_length", "hardware_yuv_to_rgb",
+            "has_non_av_track", "pre_read_fails", "disk_read_mbit_rate",
+            "has_decode_errors", "num_decode_chunks", "hardware_decode",
+        }
+        for channel, _, _ in build.DIAGNOSTIC_CHANNELS:
+            assert channel in published, f"{channel} is not on this operator"
+        assert "dropped_frames" not in published
