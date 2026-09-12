@@ -66,16 +66,126 @@ BUILD_ROOT = "generated"
 #: out of here, so it is named once and referred to rather than spelled again.
 PLAYLIST_DAT = "playlist"
 
-#: The Movie File In TOP that decodes a clip, and the null TOP that terminates
-#: the chain. Everything downstream - the switch of Phase 6, the output of
-#: whatever displays this - connects to the null rather than to the player, so
-#: the player can be replaced without anything else being rewired.
-PLAYER_TOP = "player"
+#: The two Movie File In TOPs that decode clips, and the null TOP that
+#: terminates the chain. Everything downstream connects to the null rather than
+#: to a player, which is what let Phase 6 put a Cross TOP between them without
+#: rewiring the window, and is why the null was built at Phase 2 for a chain
+#: that did not need one yet.
+#:
+#: **Two, because one cannot crossfade with itself**, and because a single
+#: player has to finish decoding a new file in the frame it is asked for it.
+#: Two players means the incoming clip is opened, cued and held a whole dwell
+#: before it is needed - which is the hitch Phase 6 existed to remove, removed
+#: by the preload rather than by the blend.
+#:
+#: The order is load-bearing: index 0 is the Cross TOP's Input1 and index 1 is
+#: its Input2, so a cross value of 0 shows PLAYER_TOPS[0] and 1 shows
+#: PLAYER_TOPS[1]. `tdpy.player` indexes this tuple with the same number it
+#: writes into the cross, which is what keeps "which player" from becoming a
+#: second fact that could disagree with the first.
+PLAYER_TOPS = ("playerA", "playerB")
 OUT_TOP = "out"
 
-#: Which playlist row to load. Phase 4 replaces this with a draw from a shuffled
-#: deck; until then it is the first clip, chosen because a fixed one makes a
-#: rebuild comparable with the one before it.
+#: The Cross TOP blending them. Its help: "when Cross = 0, Input1 is output;
+#: when Cross = 1, Input2 is output" - read out of the type stub at
+#: `bin/Lib/tdi/ops/tops/crossTOP.py` rather than assumed, since the Phase 6
+#: plan had named a Switch TOP, which hard-cuts and has no blend at all.
+#:
+#: Its `cross` is an **expression**, not a value anything writes per frame. See
+#: CROSS_EXPR for what the expression is and why the fade is shaped this way.
+CROSS_TOP = "cross"
+
+#: The Constant CHOP holding the two ends of the current fade, and the names of
+#: its two channels. This is the whole of the fade's state, it lives in the
+#: network rather than in Python, and it is written twice per cut.
+#:
+#: **Two channels rather than one.** `target` alone would do for a fade that
+#: always runs to completion from a settled start - but `start` is what makes
+#: three other cases fall out with no special handling. A fade interrupted by a
+#: next press starts from wherever the blend had got to rather than snapping.
+#: A hard cut is `start` and `target` written to the same number, so nothing
+#: has to branch on whether a fade is happening. And a fresh build is both at 0,
+#: which is correct **whatever the fade timer's fraction happens to hold** -
+#: worth having, because `timer_fraction` at a timer that has never run is a
+#: thing this project would otherwise have to be right about.
+FADE_STATE_CHOP = "fadeState"
+FADE_START_CHANNEL = "start"
+FADE_TARGET_CHANNEL = "target"
+
+#: The Timer CHOP supplying the ramp between those two ends, and the channel it
+#: is read through. `timer_fraction` runs 0 to 1 over the timer's length, which
+#: is the whole reason a Timer CHOP is used here rather than a Lag or Filter
+#: CHOP: the Lag CHOP's own help describes its lag as "approximately the time
+#: that the output follows 90% of a change", and a fade asked to take a fifth of
+#: the dwell should take a fifth of the dwell.
+#:
+#: The channel name is in `libTD.dll` alongside `timer_seconds` and
+#: `timer_active`, and is documented on Timer_CHOP.htm in the install's own
+#: OfflineHelp - the same two places `loop_frame` was confirmed and
+#: `cycle_pulse` was refused.
+FADE_TIMER_CHOP = "fade"
+FADE_CALLBACK_DAT = "fade_callbacks"
+FADE_FRACTION_CHANNEL = "timer_fraction"
+
+#: What drives the Cross TOP. Linear interpolation between the fade's two ends,
+#: evaluated every frame by TouchDesigner rather than by a Python callback
+#: pushing a number - which is the same reason the clip list's highlight is an
+#: expression over the player's `file` rather than something `_step` remembers
+#: to update.
+#:
+#: At rest `start` equals `target`, so the fraction drops out of the arithmetic
+#: entirely and the expression answers that value no matter what the timer is
+#: doing. `player.on_fade_done()` is what makes that true at the end of every
+#: fade, and it is why this needs no clamp: an expression that only matters
+#: while the two ends differ cannot overshoot once they are equal.
+#:
+#: Relative paths, because all three operators are siblings inside the build
+#: container - which also means the expression survives the container being
+#: created somewhere other than /project1.
+CROSS_EXPR = (
+    f"op('{FADE_STATE_CHOP}')['{FADE_START_CHANNEL}']"
+    f" + (op('{FADE_STATE_CHOP}')['{FADE_TARGET_CHANNEL}']"
+    f" - op('{FADE_STATE_CHOP}')['{FADE_START_CHANNEL}'])"
+    f" * op('{FADE_TIMER_CHOP}')['{FADE_FRACTION_CHANNEL}']"
+)
+
+#: Length Type and Units for the fade timer, same tokens as the dwell's. The
+#: length itself is **not** bound: it is `Dwell * Fade`, a product of two
+#: parameters rather than a view of one, and it only has to be right at the
+#: instant a fade begins - so `player._step` computes it and writes it. Binding
+#: would have needed a bindExpr helper in `startup.py`, which is a file this
+#: project does not own.
+FADE_LENGTH_TYPE = "fixed"
+FADE_LENGTH_UNITS = "Seconds"
+
+#: Outputs the `timer_fraction` channel at all. Set explicitly rather than
+#: trusted to a default, because the failure is invisible from the outside: the
+#: expression above would evaluate against a channel that is not there, and the
+#: cross would sit wherever it last was.
+FADE_OUT_FRACTION = True
+
+#: `onDone`, the callback that fires when the timer reaches its length -
+#: signature from the install's own
+#: `bin/Lib/tdutils/DATScripts/timerCHOP_callbacks.py`, where it is documented
+#: "Called when the timer is done."
+#:
+#: It does two things, both of which are `tdpy.player`'s to decide: it settles
+#: the fade's start onto its target, and it hands the now-hidden player the
+#: clip after this one so that player has the whole of the next dwell to open
+#: and decode it.
+FADE_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
+
+
+def onDone(timerOp, segment, interrupt):
+    import tdpy.player
+
+    tdpy.player.on_fade_done()
+'''
+
+#: Which playlist row to load when the deck cannot say. Phase 4 made the deck
+#: the answer and `_first_clip` asks it, so this is now only the fallback for an
+#: empty playlist - kept as a named number rather than a literal 0, because the
+#: case it covers is the one nobody looks at.
 FIRST_CLIP = 0
 
 #: Play Mode. Sequential is the default already, and is set anyway because the
@@ -424,7 +534,13 @@ def onInitCell(comp, row, col, attribs):
 #:
 #: `pars`, not `parameters` - read off the operator's parameter list rather
 #: than guessed, which is what `scaffold.params` is for.
-CLIP_LIST_EXEC_NAME = "clipList_exec"
+#: One per player, in PLAYER_TOPS order. Both are watched rather than only the
+#: one on screen, because the highlight follows whichever clip the fade is
+#: heading towards - and that is the hidden player's `file` right up until the
+#: fade begins. Watching both means the row lights up when the clip arrives on
+#: screen and not a dwell early, without anything tracking which watcher is the
+#: interesting one this time round.
+CLIP_LIST_EXEC_NAMES = ("clipListA_exec", "clipListB_exec")
 CLIP_LIST_WATCH_PAR = "file"
 CLIP_LIST_EXEC_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
 
@@ -448,8 +564,13 @@ def onValueChange(par, prev):
 #: ruled out for the dwell timer below: that one is *not* in the binary under
 #: the name the docs' neighbouring entries would suggest, so the timer is read
 #: through its callback instead.
-PLAYER_INFO_CHOP = "playerInfo"
-LOOP_EXEC_NAME = "loop_exec"
+#: One of each per player, in the same order as PLAYER_TOPS, because both
+#: players are always decoding and either can reach its own end. Only the one
+#: on screen should advance anything - the hidden player runs out constantly
+#: while it waits - so the callback says which player looped and
+#: `player.on_loop` refuses the one that is not showing.
+PLAYER_INFO_CHOPS = ("playerAInfo", "playerBInfo")
+LOOP_EXEC_NAMES = ("loopA_exec", "loopB_exec")
 LOOP_CHANNEL = "loop_frame"
 
 #: Info Type on that CHOP - see the comment where it is set for why this is the
@@ -468,7 +589,7 @@ LOOP_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
 def onOffToOn(channel, sampleIndex, val, prev):
     import tdpy.player
 
-    tdpy.player.on_loop()
+    tdpy.player.on_loop(channel.owner.name)
     return
 '''
 
@@ -532,8 +653,14 @@ def onCycleStart(timerOp, segment, cycle):
 #: same callback, which recomputes the answer from both inputs rather than
 #: setting the half it knows about - so it does not matter which of them fired,
 #: and a third input later is a third watcher and no new logic.
+#: One Play watcher per player now, for the reason there is one clip-list
+#: watcher per player: pause writes both, and whichever of them the dwell is
+#: reading has to be the one on screen. The callback is unchanged and still
+#: recomputes from scratch, so three watchers need no more logic than two did -
+#: which was the stated reason for recomputing rather than setting, arriving
+#: earlier than expected.
 DWELL_EXEC_NAME = "dwell_exec"
-DWELL_PLAY_EXEC_NAME = "dwell_play_exec"
+DWELL_PLAY_EXEC_NAMES = ("dwellA_play_exec", "dwellB_play_exec")
 PLAYER_PLAY_PAR = "play"
 DWELL_EXEC_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
 
@@ -1072,24 +1199,27 @@ def _add_clip_list_watch(panel, container, td):
     """
     from . import startup
 
-    player = container.op(PLAYER_TOP)
-    if player is None:
+    players = [container.op(name) for name in PLAYER_TOPS]
+    if any(player is None for player in players):
         startup.report(
-            f"[{startup.PACKAGE}] no {PLAYER_TOP} to watch - the clip list"
-            " will not follow the transport"
+            f"[{startup.PACKAGE}] no {', '.join(PLAYER_TOPS)} to watch - the"
+            " clip list will not follow the transport"
         )
         return None
 
-    executor = startup.create(panel, td.parameterexecuteDAT, CLIP_LIST_EXEC_NAME)
-    executor.nodeX, executor.nodeY = 300, -750
-    executor.text = CLIP_LIST_EXEC_CALLBACK
-    startup.set_par(executor, "op", player.path)
-    startup.set_par(executor, "pars", CLIP_LIST_WATCH_PAR)
-    startup.set_par(executor, "builtin", True)
-    startup.set_par(executor, "custom", False)
-    startup.set_par(executor, "valuechange", True)
-    startup.set_par(executor, "active", True)
-    return executor
+    executors = []
+    for index, (player, name) in enumerate(zip(players, CLIP_LIST_EXEC_NAMES)):
+        executor = startup.create(panel, td.parameterexecuteDAT, name)
+        executor.nodeX, executor.nodeY = 300, -750 - index * 150
+        executor.text = CLIP_LIST_EXEC_CALLBACK
+        startup.set_par(executor, "op", player.path)
+        startup.set_par(executor, "pars", CLIP_LIST_WATCH_PAR)
+        startup.set_par(executor, "builtin", True)
+        startup.set_par(executor, "custom", False)
+        startup.set_par(executor, "valuechange", True)
+        startup.set_par(executor, "active", True)
+        executors.append(executor)
+    return executors
 
 
 def pulse(operator, name):
@@ -1113,58 +1243,158 @@ def pulse(operator, name):
 
 
 def _add_player(container, rows, configuration, td):
-    """One Movie File In TOP, playing, into a null.
+    """Two Movie File In TOPs, through a Cross TOP, into a null.
 
-    The null is not decoration. A Movie File In TOP is the operator most likely
-    to be replaced - by a second one and a Switch TOP at Phase 6 - and anything
-    connected to it directly would have to be rewired when that happens.
+    The null is not decoration, and Phase 6 is what it was for. A Movie File In
+    TOP was always the operator most likely to be replaced, so nothing
+    downstream was ever connected to one - which is why a second player and a
+    blend could be dropped into the middle of the chain with the window, the
+    control panel and the display all untouched.
 
-    Its speed is **bound** to the settings COMP's Speed rather than set here,
-    which is the whole of what item 5 costs: a slider, a typed value and a MIDI
-    CC all reach the player through one parameter, and no code carries a number
-    from one to the other. Nothing else in this project may write `speed` on
-    the player - a binding is two-way, so a stray `set_par` would not be
-    overridden by the master, it would overwrite it.
+    **The Cross TOP rather than the Switch TOP the plan named.** A Switch is a
+    hard cut, and this phase is a fade; the Cross's own help gives the
+    convention the rest of this module depends on - Cross 0 shows Input1, Cross
+    1 shows Input2 - so the connection order here *is* the meaning of the number
+    `tdpy.player` writes.
+
+    Both players are configured identically and neither is special. Which of
+    them is on screen is a fact about the cross value, derived wherever it is
+    needed rather than recorded anywhere - the same move the transport makes in
+    reading its position off `file` instead of keeping an index.
+
+    Speed is **bound** to the settings COMP's Speed on both, which is what makes
+    two players cost nothing here: one master, two views, and a MIDI CC at Phase
+    7 still writing one place. Nothing in this project may write `speed` on a
+    player - a binding is two-way, so a stray `set_par` would overwrite the
+    master rather than be overridden by it.
     """
     from . import playlist, settings, startup
 
-    player = _place(
-        startup.create(container, td.moviefileinTOP, PLAYER_TOP), 0, -200
-    )
-    out = _place(startup.create(container, td.nullTOP, OUT_TOP), 250, -200)
-    out.inputConnectors[0].connect(player)
+    speed = settings.parameter(configuration, settings.SPEED)
+    players = []
+    for index, name in enumerate(PLAYER_TOPS):
+        player = _place(
+            startup.create(container, td.moviefileinTOP, name), 0, -150 - index * 150
+        )
+        startup.set_menu(player, "playmode", PLAY_MODE)
+        startup.set_par(player, "play", True)
 
+        # The end-of-file and cue policies are *configuration* rather than
+        # behaviour: a player always loops and always cues in fractions, and the
+        # two settings decide what is done about it. Set here so `tdpy.player`
+        # never has to touch a menu - it writes a number into `cuepoint` and
+        # fires a pulse, and both mean the same thing on every clip.
+        startup.set_menu(player, "textendright", PLAYER_EXTEND_RIGHT)
+        startup.set_menu(player, "cuepointunit", CUE_POINT_UNIT)
+
+        if speed is not None:
+            startup.bind(player.par.speed, speed)
+
+        # TOPs draw their image on the node when the viewer flag is set, which
+        # makes a network opened mid-performance legible: both players visible,
+        # and the cross between them showing which one is actually out.
+        player.viewer = True
+        players.append(player)
+
+    # Both of the expression's operands before the expression. A parameter put
+    # into Expression mode against an `op()` that does not exist yet holds the
+    # error even after the node arrives, so the fade's timer and state are built
+    # here - with the chain they drive - rather than with the cycle that starts
+    # them.
+    state = _add_fade_state(container, td)
+    _add_fade(container, td)
+
+    cross = _place(startup.create(container, td.crossTOP, CROSS_TOP), 250, -225)
+    cross.inputConnectors[0].connect(players[0])
+    cross.inputConnectors[1].connect(players[1])
+    _set_expression(cross.par.cross, CROSS_EXPR, startup)
+    cross.viewer = True
+
+    out = _place(startup.create(container, td.nullTOP, OUT_TOP), 500, -225)
+    out.inputConnectors[0].connect(cross)
+    out.viewer = True
+
+    # Both players get a clip up front, and they get *different* ones: the
+    # second is the preload the whole phase is for, sitting decoded and ready
+    # so the first cut has the same margin every later cut does. A playlist of
+    # one hands both players the same file, which is correct - there is nothing
+    # else to cut to, and it fades to itself rather than failing.
+    #
     # Relative to the .toe, which sits at the project root - the same root the
     # playlist stored these paths against. Keeping them relative is what lets
     # the repository be cloned to a different folder and still play.
-    path = playlist.clip_path(rows, FIRST_CLIP)
-    startup.set_par(player, "file", path)
-    startup.set_menu(player, "playmode", PLAY_MODE)
-    startup.set_par(player, "play", True)
-
-    # The end-of-file and cue policies are *configuration* rather than
-    # behaviour: the player always loops and always cues in fractions, and the
-    # two settings decide what is done about it. Set here so `tdpy.player` never
-    # has to touch a menu - it writes a number into `cuepoint` and fires a
-    # pulse, and both mean the same thing on every clip.
-    startup.set_menu(player, "textendright", PLAYER_EXTEND_RIGHT)
-    startup.set_menu(player, "cuepointunit", CUE_POINT_UNIT)
-
-    speed = settings.parameter(configuration, settings.SPEED)
-    if speed is not None:
-        startup.bind(player.par.speed, speed)
-
-    # TOPs draw their image on the node when the viewer flag is set, which is
-    # all "on screen" needs to mean at this phase. A perform window is a Phase 8
-    # concern, and would be one more thing to undo if it were built now.
-    player.viewer = True
-    out.viewer = True
+    paths = []
+    for index, player in enumerate(players):
+        path = playlist.clip_path(rows, _first_clip(rows, index))
+        startup.set_par(player, "file", path)
+        paths.append(path)
 
     startup.report(
         f"[{startup.PACKAGE}] player at {out.path} <- "
-        + (path or "no file - playlist is empty")
+        + (" / ".join(path or "-" for path in paths) if any(paths)
+           else "no file - playlist is empty")
+        + f", crossfading via {state.path}"
     )
     return out
+
+
+def _first_clip(rows, index):
+    """Which playlist row player `index` opens with.
+
+    The deck's own order, so the first cut plays the clip the panel says is
+    next rather than whatever happened to be preloaded. `player.play_order` is
+    asked rather than `range` assumed, for the same reason the clip list asks
+    it: a seed set before a rebuild should survive one.
+    """
+    from . import player
+
+    order = player.play_order(len(rows))
+    if not order:
+        return FIRST_CLIP
+    return order[index % len(order)]
+
+
+def _set_expression(parameter, expression, startup):
+    """Put a parameter into Expression mode with that expression. Returns it.
+
+    Not `startup.bind`, and the difference is the point. A binding is between
+    two parameters and carries a value both ways; this is one parameter
+    computed from CHOP channels, read-only from the network's side, and there
+    is no master to write back to.
+
+    Both halves are set for the same reason `bind` sets both: an `expr` on a
+    parameter still in Constant mode is inert and looks from the outside
+    exactly like an expression that failed.
+    """
+    mode = startup.td_enum("ParMode")
+    if mode is None:
+        return None
+    parameter.expr = expression
+    parameter.mode = mode.EXPRESSION
+    return parameter
+
+
+def _add_fade_state(container, td):
+    """The Constant CHOP holding the fade's two ends. Returns it.
+
+    Created at 0 and 0, which is a settled cross on PLAYER_TOPS[0] - the state
+    a fresh build should be in, and the one case the arithmetic in CROSS_EXPR
+    has to be right about before anything has run.
+    """
+    from . import startup
+
+    state = _place(
+        startup.create(container, td.constantCHOP, FADE_STATE_CHOP), 250, -400
+    )
+    # `const0name`/`const0value`, read off the type stub at
+    # bin/Lib/tdi/ops/chops/constantCHOP.py rather than guessed - the pairing of
+    # a name parameter with a value parameter is the kind of thing that is
+    # spelled three plausible ways.
+    startup.set_par(state, "const0name", FADE_START_CHANNEL)
+    startup.set_par(state, "const0value", 0.0)
+    startup.set_par(state, "const1name", FADE_TARGET_CHANNEL)
+    startup.set_par(state, "const1value", 0.0)
+    return state
 
 
 def _add_cycle(container, configuration, td):
@@ -1190,50 +1420,62 @@ def _add_cycle(container, configuration, td):
     """
     from . import settings, startup
 
-    player = container.op(PLAYER_TOP)
-    if player is None:
+    players = [container.op(name) for name in PLAYER_TOPS]
+    if any(player is None for player in players):
         startup.report(
-            f"[{startup.PACKAGE}] no {PLAYER_TOP} to drive - nothing will"
-            " advance on its own"
+            f"[{startup.PACKAGE}] no {', '.join(PLAYER_TOPS)} to drive -"
+            " nothing will advance on its own"
         )
         return None
 
-    # Info CHOP, because `loop_frame` is a channel the player publishes rather
-    # than a parameter it carries. Nothing can bind to it and no Parameter
-    # Execute DAT can watch it; an Info CHOP is how it is reached at all.
-    info = _place(startup.create(container, td.infoCHOP, PLAYER_INFO_CHOP), 0, -400)
-    startup.set_par(info, "op", player.path)
-    # All rather than General, deliberately. General is documented as "the
-    # channels of the specific OP type", which should be where `loop_frame`
-    # lives - but All is documented as every set appended together, so it cannot
-    # be the narrower one that leaves the channel out. The cost is channels
-    # nothing reads; the alternative risks a watcher wired to a channel that
-    # is not there, which fails silently.
-    startup.set_menu(info, "infotype", INFO_TYPE)
+    # One Info CHOP and one watcher per player, because `loop_frame` is a
+    # channel a player publishes rather than a parameter it carries: nothing can
+    # bind to it and no Parameter Execute DAT can watch it, so each player needs
+    # its own reader.
+    #
+    # **Both are watched and only one of them counts.** The hidden player is
+    # decoding a clip nobody is looking at and will loop repeatedly while it
+    # waits, so the callback says which player it was and `player.on_loop`
+    # refuses the one that is not on screen. Filtering here instead would mean
+    # building the watchers around a fact that changes every cut.
+    for index, (player, info_name, exec_name) in enumerate(
+        zip(players, PLAYER_INFO_CHOPS, LOOP_EXEC_NAMES)
+    ):
+        y = -400 - index * 150
+        info = _place(startup.create(container, td.infoCHOP, info_name), 0, y)
+        startup.set_par(info, "op", player.path)
+        # All rather than General, deliberately. General is documented as "the
+        # channels of the specific OP type", which should be where `loop_frame`
+        # lives - but All is documented as every set appended together, so it
+        # cannot be the narrower one that leaves the channel out. The cost is
+        # channels nothing reads; the alternative risks a watcher wired to a
+        # channel that is not there, which fails silently.
+        startup.set_menu(info, "infotype", INFO_TYPE)
 
-    watcher = _place(
-        startup.create(container, td.chopexecuteDAT, LOOP_EXEC_NAME), 250, -400
-    )
-    watcher.text = LOOP_CALLBACK
-    startup.set_par(watcher, "chop", info.path)
-    startup.set_par(watcher, "channel", LOOP_CHANNEL)
-    # The rising edge only. Every other trigger is turned off explicitly rather
-    # than left at its default, because a second one firing would advance twice
-    # per loop and the symptom is a player that skips a clip now and then.
-    startup.set_par(watcher, "offtoon", True)
-    startup.set_par(watcher, "whileon", False)
-    startup.set_par(watcher, "ontooff", False)
-    startup.set_par(watcher, "whileoff", False)
-    startup.set_par(watcher, "valuechange", False)
-    startup.set_par(watcher, "active", True)
+        watcher = _place(
+            startup.create(container, td.chopexecuteDAT, exec_name), 250, y
+        )
+        watcher.text = LOOP_CALLBACK
+        startup.set_par(watcher, "chop", info.path)
+        startup.set_par(watcher, "channel", LOOP_CHANNEL)
+        # The rising edge only. Every other trigger is turned off explicitly
+        # rather than left at its default, because a second one firing would
+        # advance twice per loop and the symptom is a player that skips a clip
+        # now and then.
+        startup.set_par(watcher, "offtoon", True)
+        startup.set_par(watcher, "whileon", False)
+        startup.set_par(watcher, "ontooff", False)
+        startup.set_par(watcher, "whileoff", False)
+        startup.set_par(watcher, "valuechange", False)
+        startup.set_par(watcher, "active", True)
 
     callbacks = _place(
-        startup.create(container, td.textDAT, DWELL_CALLBACK_DAT), 250, -550
+        startup.create(container, td.textDAT, DWELL_CALLBACK_DAT), 250, -700
     )
     callbacks.text = DWELL_CALLBACK
 
     timer = _place(
-        startup.create(container, td.timerCHOP, DWELL_TIMER_CHOP), 0, -550
+        startup.create(container, td.timerCHOP, DWELL_TIMER_CHOP), 0, -700
     )
     startup.set_menu(timer, "lengthtype", DWELL_LENGTH_TYPE)
     startup.set_menu(timer, "lengthunits", DWELL_LENGTH_UNITS)
@@ -1261,16 +1503,62 @@ def _add_cycle(container, configuration, td):
     # about. A DAT watching the wrong one of builtin/custom sits there looking
     # correctly configured and never fires, so both are always set explicitly.
     _add_dwell_watch(
-        container, DWELL_EXEC_NAME, configuration, settings.DWELL, -700, True, td
+        container, DWELL_EXEC_NAME, configuration, settings.DWELL, -850, True, td
     )
-    _add_dwell_watch(
-        container, DWELL_PLAY_EXEC_NAME, player, PLAYER_PLAY_PAR, -850, False, td
-    )
+    for index, (player, exec_name) in enumerate(zip(players, DWELL_PLAY_EXEC_NAMES)):
+        _add_dwell_watch(
+            container, exec_name, player, PLAYER_PLAY_PAR,
+            -1000 - index * 150, False, td,
+        )
 
     startup.report(
         f"[{startup.PACKAGE}] cycle at {timer.path}: {LOOP_CHANNEL} watched"
-        f" via {info.path}, dwell bound to {settings.DWELL}"
+        f" via {', '.join(PLAYER_INFO_CHOPS)}, dwell bound to {settings.DWELL}"
     )
+    return timer
+
+
+def _add_fade(container, td):
+    """The Timer CHOP that ramps the cross, and its callback. Returns it.
+
+    Built with the chain rather than with the cycle, because the Cross TOP's
+    expression names it and a parameter put into Expression mode against an
+    operator that is not there yet keeps the error afterwards.
+
+    Not started here, and that is the difference between this timer and the
+    dwell's. The dwell runs continuously and its Play is a derived state; this
+    one is started by `player._step()` at each cut and runs exactly once per
+    fade, so a build leaves it idle and there is nothing to refresh.
+
+    Its length is not bound either - see FADE_LENGTH_TYPE for why the product of
+    two parameters is computed rather than mirrored. Which means `deferpars`
+    matters here in a way it does not for the dwell: the length is written in
+    the same breath as the Start pulse, so a timer that ignored parameter
+    changes until its next Initialize would run every fade at the *previous*
+    fade's length. Off, explicitly, for a failure that would otherwise look
+    like a fade slider one cut behind itself.
+    """
+    from . import startup
+
+    callbacks = _place(
+        startup.create(container, td.textDAT, FADE_CALLBACK_DAT), 250, -550
+    )
+    callbacks.text = FADE_CALLBACK
+
+    timer = _place(
+        startup.create(container, td.timerCHOP, FADE_TIMER_CHOP), 0, -550
+    )
+    startup.set_menu(timer, "lengthtype", FADE_LENGTH_TYPE)
+    startup.set_menu(timer, "lengthunits", FADE_LENGTH_UNITS)
+    # One run per fade: no cycling, and nothing to reset between fades beyond
+    # the Start pulse `_step` fires.
+    startup.set_par(timer, "cycle", False)
+    startup.set_par(timer, "deferpars", False)
+    # The channel CROSS_EXPR reads. A default is not trusted for this one
+    # because its absence is silent: the expression would evaluate against a
+    # channel that is not there and the cross would sit where it last was.
+    startup.set_par(timer, "outfraction", FADE_OUT_FRACTION)
+    startup.set_par(timer, "callbacks", callbacks.path)
     return timer
 
 

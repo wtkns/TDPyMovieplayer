@@ -37,10 +37,42 @@ class TestSpecification:
             settings.ADVANCE_ON_END,
             settings.RANDOM_CUE,
             settings.DWELL,
+            settings.FADE,
             settings.SPEED,
         )
         assert [settings.spec(name).name for name in named] == list(named)
         assert silent == []
+
+    def test_the_named_constants_cover_every_setting(self):
+        # Derived rather than listed, so adding a setting without a constant
+        # beside it fails here instead of at the first `settings.value` call in
+        # a running TouchDesigner. The list above is the order; this is the set.
+        named = {
+            settings.ADVANCE_ON_END,
+            settings.RANDOM_CUE,
+            settings.DWELL,
+            settings.FADE,
+            settings.SPEED,
+        }
+        assert {item.name for item in settings.SETTINGS} == named
+
+    def test_fade_is_a_fraction_and_not_a_duration(self):
+        # The whole of what makes `player.fade_seconds` a product. A range of
+        # 0-1 is what says so on the panel, and clamping the top as well as the
+        # bottom is what keeps it one - unlike speed, where the slider's end is
+        # only where the slider stops.
+        fade = settings.spec(settings.FADE)
+        assert (fade.minimum, fade.maximum) == (0.0, 1.0)
+        assert fade.default == 0.0
+        assert fade.bounded is True
+        assert settings.attributes(fade)["clampMax"] is True
+
+    def test_only_a_bounded_setting_clamps_at_the_top(self):
+        # Speed's slider stopping at 4 is a convenience; a typed 8 should take.
+        speed = settings.spec(settings.SPEED)
+        assert speed.bounded is False
+        assert settings.attributes(speed)["clampMax"] is False
+        assert settings.attributes(speed)["clampMin"] is True
 
     def test_an_unknown_setting_is_reported_with_the_real_ones(self, silent):
         assert settings.spec("Dwelltime") is None

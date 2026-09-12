@@ -392,10 +392,54 @@ def advanced(monkeypatch):
 
 @pytest.fixture
 def clip(monkeypatch):
-    """A player TOP whose Play can be moved, and no playlist behind it."""
-    node = FakeOp("/project1/generated/player", play=True)
+    """A player TOP whose Play can be moved, and no playlist behind it.
+
+    Stubbed at `_ops`, which since Phase 6 answers *the live player* rather than
+    the only one - so a test of the dwell still gets one operator and does not
+    have to know there are two behind it.
+    """
+    node = FakeOp("/project1/generated/playerA", play=True)
     monkeypatch.setattr(player, "_ops", lambda: (node, None))
     return node
+
+
+class FakeFadeState:
+    """The Constant CHOP holding the fade's two ends.
+
+    Only its two value parameters, which is all `fade_target` reads and all
+    `_begin_fade` writes.
+    """
+
+    path = "/project1/generated/fadeState"
+
+    def __init__(self, start=0.0, target=0.0):
+        self.par = FakePars(const0value=start, const1value=target)
+
+
+@pytest.fixture
+def fade_state(monkeypatch):
+    """A fade state settled on the first player, with a container behind it.
+
+    `_container` is stubbed to something that is merely not None, because the
+    functions under test reach it only to pass it to `_fade_state`, which is
+    stubbed too.
+    """
+    state = FakeFadeState()
+    monkeypatch.setattr(player, "_container", lambda: object())
+    monkeypatch.setattr(player, "_fade_state", lambda container: state)
+    return state
+
+
+@pytest.fixture
+def live(monkeypatch):
+    """Whether the player that looped is the one on screen.
+
+    A one-item list so a test can flip it: `live[0] = False` is the hidden
+    player wrapping while it waits, which is the case two players introduced.
+    """
+    answer = [True]
+    monkeypatch.setattr(player, "looped_player_is_live", lambda name: answer[0])
+    return answer
 
 
 @pytest.fixture
@@ -438,23 +482,138 @@ class TestCueFraction:
 
 
 class TestOnLoop:
-    """The end-of-file policy: one toggle over a player that always loops."""
+    """The end-of-file policy: one toggle over players that always loop.
 
-    def test_advances_when_advance_at_end_is_on(self, setting, advanced):
-        player.on_loop()
+    Two players now, and only the one on screen counts - `looped_player_is_live`
+    is the question, and it is stubbed here so these stay tests of the policy
+    rather than of the fade state behind it. `TestLoopedPlayerIsLive` covers the
+    question itself.
+    """
+
+    def test_advances_when_advance_at_end_is_on(self, setting, live, advanced):
+        player.on_loop("playerAInfo")
         assert advanced == ["next"]
 
-    def test_leaves_the_clip_looping_when_it_is_off(self, setting, advanced):
+    def test_leaves_the_clip_looping_when_it_is_off(self, setting, live, advanced):
         setting[settings.ADVANCE_ON_END] = False
-        player.on_loop()
+        player.on_loop("playerAInfo")
         assert advanced == []
 
-    def test_the_launch_default_advances(self, setting, advanced):
+    def test_the_launch_default_advances(self, setting, live, advanced):
         # The one automatic behaviour that is on at launch, because with no
         # timer running and nothing pressed, nothing else would ever advance.
         assert setting[settings.ADVANCE_ON_END] is True
-        player.on_loop()
+        player.on_loop("playerAInfo")
         assert advanced == ["next"]
+
+    def test_the_hidden_player_looping_advances_nothing(
+        self, setting, live, advanced
+    ):
+        # The case the second player introduced, and the one that would look
+        # like the transport had lost its mind: a preloaded clip shorter than
+        # the dwell wraps repeatedly while it waits to be shown, and every wrap
+        # arrives here.
+        live[0] = False
+        player.on_loop("playerBInfo")
+        assert advanced == []
+
+    def test_the_setting_is_not_even_read_for_the_hidden_player(
+        self, monkeypatch, live, advanced
+    ):
+        # Which player looped is asked first. Reading the toggle for a loop that
+        # cannot advance anything would be harmless today and misleading to
+        # anyone reading the order later.
+        def refuse(name):
+            raise AssertionError(f"read {name} for a loop that is not on screen")
+
+        monkeypatch.setattr(settings, "value", refuse)
+        live[0] = False
+        player.on_loop("playerBInfo")
+        assert advanced == []
+
+
+class TestLoopedPlayerIsLive:
+    """Turning the name of a watcher's Info CHOP into a yes or no."""
+
+    def test_the_live_players_info_chop_is_live(self, fade_state):
+        fade_state.par.const1value.val = 0.0
+        assert player.looped_player_is_live("playerAInfo") is True
+        assert player.looped_player_is_live("playerBInfo") is False
+
+    def test_it_follows_the_fade_target(self, fade_state):
+        fade_state.par.const1value.val = 1.0
+        assert player.looped_player_is_live("playerBInfo") is True
+        assert player.looped_player_is_live("playerAInfo") is False
+
+    def test_an_unknown_watcher_advances_nothing(self, fade_state, silent):
+        # A watcher wired to an operator this module has never heard of should
+        # not advance the playlist, and should say so rather than fail silently.
+        assert player.looped_player_is_live("somethingElse") is False
+        assert any("somethingElse" in line for line in silent)
+
+    def test_no_container_is_not_live(self, monkeypatch):
+        monkeypatch.setattr(player, "_container", lambda: None)
+        assert player.looped_player_is_live("playerAInfo") is False
+
+
+class TestFadeSeconds:
+    """The fade's length: a fraction of the dwell, so a product of two."""
+
+    def test_a_fraction_of_the_dwell(self):
+        assert player.fade_seconds(10.0, 0.2) == 2.0
+        assert player.fade_seconds(4.0, 0.5) == 2.0
+
+    def test_a_fade_of_zero_is_a_hard_cut(self):
+        assert player.fade_seconds(10.0, 0.0) == 0.0
+
+    def test_a_full_fade_is_the_whole_dwell(self):
+        # Fade 1 is a player that is never settled on one clip - the top of the
+        # slider is a real mode, the way the bottom of the dwell is.
+        assert player.fade_seconds(10.0, 1.0) == 10.0
+
+    def test_no_dwell_means_no_fade(self):
+        # The consequence of making fade a fraction: with the dwell timer off
+        # there is nothing for the fraction to be a fraction of, so a next press
+        # and an end-of-file advance both cut hard.
+        assert player.fade_seconds(0.0, 0.5) == 0.0
+
+    def test_negatives_answer_zero_rather_than_a_negative_length(self):
+        # Both parameters clamp at the bottom on the settings COMP, so this is
+        # the belt to that braces: a Timer CHOP given a negative length fails
+        # with no obvious symptom.
+        assert player.fade_seconds(-4.0, 0.5) == 0.0
+        assert player.fade_seconds(4.0, -0.5) == 0.0
+
+    def test_answers_a_float_from_whatever_a_parameter_gives(self):
+        # Both arrive from Par.eval(), which can hand back an int.
+        assert player.fade_seconds(10, 1) == 10.0
+        assert isinstance(player.fade_seconds(10, 1), float)
+
+
+class TestFadeTarget:
+    """Which player is live, read off the network rather than remembered."""
+
+    def test_zero_is_the_first_player(self, fade_state):
+        fade_state.par.const1value.val = 0.0
+        assert player.fade_target(fade_state) == 0
+
+    def test_one_is_the_second_player(self, fade_state):
+        fade_state.par.const1value.val = 1.0
+        assert player.fade_target(fade_state) == 1
+
+    def test_a_missing_fade_state_answers_the_first_player(self):
+        # Rather than None. Every caller indexes a two-item list with this, and
+        # a build with no fade state in it should still play something.
+        assert player.fade_target(None) == 0
+
+    def test_it_answers_during_a_fade_and_not_only_at_rest(self, fade_state):
+        # The property the clip list depends on: target is written once per cut
+        # and holds, so the highlight moves to the incoming clip when the fade
+        # begins rather than flipping halfway through it. Nothing about a fade
+        # in progress is visible in this number, which is the point.
+        fade_state.par.const0value.val = 0.0
+        fade_state.par.const1value.val = 1.0
+        assert player.fade_target(fade_state) == 1
 
 
 class TestOnDwell:

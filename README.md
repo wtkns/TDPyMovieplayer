@@ -2,8 +2,16 @@
 
 A movie player whose network is built by Python, not by hand: it reads a folder
 of video files, measures them, and plays them in a random order - each clip
-starting at a random point and running at a random speed, cut to the next after
-a fixed dwell time.
+starting at a random point and running at a random speed, crossfading to the
+next after a fixed dwell time.
+
+Two Movie File In TOPs sit behind a Cross TOP. Only one is on screen at a time;
+the other already has the next clip open and decoded, and has had it for the
+whole of the current clip's dwell. That preload is what makes a cut clean, and
+the fade is measured as a **fraction of the dwell** rather than as a duration of
+its own - so a fade of 0.2 is a fifth of the hold however long the hold is. A
+fade of 0 is a hard cut, and a dwell of 0 switches the cycle off entirely and
+takes the fade with it.
 
 `TDPyMovieplayer.toe` holds no project code. It carries one Execute DAT that reads its
 source from `DAT/StartupExec.py`, puts this folder on `sys.path`, and hands off

@@ -1,7 +1,8 @@
 """The player's settings, as custom parameters on a COMP of their own.
 
-Four values decide how the cycle behaves: what happens when a file ends, where
-a clip starts when it changes, how long a clip is held, and how fast it runs.
+Five values decide how the cycle behaves: what happens when a file ends, where
+a clip starts when it changes, how long a clip is held, how much of that hold
+is spent crossfading into the next one, and how fast it runs.
 Each of them has **several writers** - a slider, a typed field, and a MIDI CC
 at Phase 7 - and that is what makes them different from the deck's seed, which
 has exactly one writer and is an action rather than a value. A seed can be a
@@ -31,19 +32,24 @@ from . import build, startup
 #: here rather than in `build.py` so a setting is one row in one table - adding
 #: another means adding a line below and nothing else.
 #:
-#: `minimum`/`maximum` are the slider's ends rather than hard limits, and the
-#: distinction matters: the value is clamped at the bottom, because a negative
-#: dwell means nothing, and deliberately not at the top, so a speed of 8 can be
-#: typed into the Parameter COMP even though the slider only reaches 4.
+#: `minimum` is always a hard limit - a negative dwell, fade or speed means
+#: nothing - and `maximum` is where the slider stops, which is a different
+#: claim. `bounded` is which of the two the top is: False leaves it open, so a
+#: speed of 8 can be typed into the Parameter COMP even though the slider only
+#: reaches 4, and True makes it a real ceiling.
+#:
+#: Only a setting whose range *means* something is bounded. Fade is a fraction
+#: of the dwell, so 1 is all of it and there is nothing above that to ask for;
+#: speed and dwell have no natural top and their sliders are a convenience.
 Setting = collections.namedtuple(
-    "Setting", "name node label kind default minimum maximum"
+    "Setting", "name node label kind default minimum maximum bounded"
 )
 
 #: The custom page the parameters go on. One page, named for what it configures
 #: rather than "Settings", since the COMP is already called that.
 PAGE = "Player"
 
-#: The four settings, in the order they are drawn.
+#: The five settings, in the order they are drawn.
 #:
 #: **Every stochastic or automatic behaviour is off at launch.** The clips play
 #: in the playlist's order, each from its start, at speed 1, held for as long as
@@ -53,13 +59,30 @@ PAGE = "Player"
 #:
 #: A dwell of 0 is not a very fast cut - it is the timer switched off, which is
 #: what makes the bottom of the slider a real mode rather than an accident.
+#:
+#: **Fade is a fraction of the dwell rather than a duration of its own**, which
+#: is the same choice the cue point makes and for the same reason: it stays
+#: correct when the thing it is measured against changes. A fade of 0.2 is a
+#: fifth of the hold however long the hold is, so tuning the dwell does not
+#: silently turn a gentle blend into most of the clip. 0 is a hard cut and 1 is
+#: a player that is always mid-fade.
+#:
+#: The consequence worth knowing is at the bottom of the dwell: with Dwell at 0
+#: the fade is 0 seconds too, so every cut is hard - including a next press and
+#: an end-of-file advance. That follows from what the parameter says it is, and
+#: it keeps the bottom of the dwell slider one clear mode rather than two.
 SETTINGS = (
     Setting(
-        "Advanceonend", "advanceonend", "advance at end", "toggle", True, None, None
+        "Advanceonend", "advanceonend", "advance at end", "toggle", True,
+        None, None, False,
     ),
-    Setting("Randomcue", "randomcue", "random cue", "toggle", False, None, None),
-    Setting("Dwell", "dwell", "dwell", "float", 0.0, 0.0, 60.0),
-    Setting("Speed", "speed", "speed", "float", 1.0, 0.0, 4.0),
+    Setting(
+        "Randomcue", "randomcue", "random cue", "toggle", False,
+        None, None, False,
+    ),
+    Setting("Dwell", "dwell", "dwell", "float", 0.0, 0.0, 60.0, False),
+    Setting("Fade", "fade", "fade", "float", 0.0, 0.0, 1.0, True),
+    Setting("Speed", "speed", "speed", "float", 1.0, 0.0, 4.0, False),
 )
 
 #: Names the rest of the project refers to, so a rename here is caught by the
@@ -67,6 +90,7 @@ SETTINGS = (
 ADVANCE_ON_END = "Advanceonend"
 RANDOM_CUE = "Randomcue"
 DWELL = "Dwell"
+FADE = "Fade"
 SPEED = "Speed"
 
 
@@ -99,10 +123,14 @@ def attributes(setting):
     passes through - there is no second vocabulary to keep in step with the
     first.
 
-    `clampMin` and not `clampMax`, for the reason in the Setting docstring: the
-    bottom of each range is a real limit and the top is only where the slider
-    stops. `normMin`/`normMax` are what make the parameter draw as a slider in
-    a Parameter COMP at all, which is half of what the surface is.
+    `clampMin` is always on and `clampMax` follows the setting's `bounded`, for
+    the reason in the Setting docstring: the bottom of every range is a real
+    limit, and whether the top is one depends on what the number means. A fade
+    is a fraction and 1 is all of it; a speed of 8 is a thing somebody might
+    reasonably type into a slider that only draws as far as 4.
+
+    `normMin`/`normMax` are what make the parameter draw as a slider in a
+    Parameter COMP at all, which is half of what the surface is.
     """
     if setting.kind != "float":
         return {"default": setting.default}
@@ -111,7 +139,7 @@ def attributes(setting):
         "min": setting.minimum,
         "max": setting.maximum,
         "clampMin": True,
-        "clampMax": False,
+        "clampMax": setting.bounded,
         "normMin": setting.minimum,
         "normMax": setting.maximum,
     }

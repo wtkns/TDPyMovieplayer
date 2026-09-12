@@ -23,9 +23,21 @@ second entry point would have been a second name for the same call.
 lets the cue policy and the dwell restart live in one place and be inherited
 identically by all five triggers.
 
-Nothing is cached between calls. The operators are looked up by path every
-time, because `build()` destroys and recreates them and a reference captured
-at import would be pointing at a corpse after the first rebuild.
+**Phase 6 added a second player and changed none of that.** There are now two
+Movie File In TOPs behind a Cross TOP, and `_step()` loads the hidden one and
+sends the cross at it rather than replacing the clip that is showing. The
+shims above are untouched, because "advance" still means one function call -
+what changed is which operator that call writes to, and that is answered by
+`fade_target()` from the network rather than tracked here.
+
+Nothing is cached between calls, and nothing about which player is live is
+stored. The operators are looked up by path every time, because `build()`
+destroys and recreates them and a reference captured at import would be
+pointing at a corpse after the first rebuild - and the live player is read off
+the fade state for the same reason the current clip is read off `file`: a
+second record of a fact is a second thing that can be wrong about it.
+
+The one remaining piece of runtime state in this project is still `SEED`.
 """
 
 import random
@@ -71,16 +83,84 @@ def _container():
 
 
 def _ops():
-    """The player TOP and the playlist DAT, or (None, None) with a log line.
+    """The player TOP on screen and the playlist DAT, or (None, None).
 
     One lookup for both, since no caller wants one without the other and a
     missing container is the same failure either way - the build has not run,
     or it failed and `startup.build()` already said so.
+
+    **"The player" is now a question with an answer that changes**, and this is
+    where it is asked. Phase 6 put two Movie File In TOPs behind a Cross TOP,
+    and the one that matters is whichever the fade is heading towards - see
+    `live_index`. Every caller that used to mean "the player" means that one,
+    which is why they did not have to change.
     """
     container = _container()
     if container is None:
         return None, None
-    return container.op(build.PLAYER_TOP), container.op(build.PLAYLIST_DAT)
+    return _live_player(container), container.op(build.PLAYLIST_DAT)
+
+
+def _players(container):
+    """Both Movie File In TOPs, in PLAYER_TOPS order, or [] with a line.
+
+    Order is the Cross TOP's wiring: index 0 is Input1 and index 1 is Input2,
+    so a position in this list and a cross value are the same number.
+    """
+    found = [container.op(name) for name in build.PLAYER_TOPS]
+    if any(player is None for player in found):
+        startup.report(
+            f"[{startup.PACKAGE}] missing {', '.join(build.PLAYER_TOPS)} in"
+            f" {container.path} - has the build run?"
+        )
+        return []
+    return found
+
+
+def _fade_state(container):
+    """The Constant CHOP holding the fade's two ends, or None with a line."""
+    state = container.op(build.FADE_STATE_CHOP)
+    if state is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.FADE_STATE_CHOP} in"
+            f" {container.path} - cuts cannot cross from one player to the other"
+        )
+    return state
+
+
+def fade_target(state):
+    """Which player the cross is settling on, as 0 or 1, from the fade state.
+
+    **This is what "the current clip" means with two players**, and it is read
+    off the network rather than remembered. The target is written once per cut
+    and holds until the next one, so it answers the same thing during a fade
+    and at rest - which is what makes the clip list highlight the incoming clip
+    from the moment the fade starts rather than flipping halfway through it.
+
+    Nothing here stores anything. That was the property Phase 4 was careful to
+    keep - no index in Python that a rebuild or a reshuffle could desynchronise
+    from what is on screen - and two players is exactly the change that would
+    have broken it, had the answer been kept rather than derived.
+    """
+    if state is None:
+        return 0
+    return 1 if state.par.const1value.eval() >= 0.5 else 0
+
+
+def _live_player(container):
+    """The Movie File In TOP the cross is settling on, or None."""
+    players = _players(container)
+    if not players:
+        return None
+    return players[fade_target(_fade_state(container))]
+
+
+def _hidden_player(container):
+    """The other one - the player that is about to be loaded for the next cut."""
+    players = _players(container)
+    if not players:
+        return None
+    return players[1 - fade_target(_fade_state(container))]
 
 
 def play():
@@ -89,11 +169,31 @@ def play():
     Silent on success. A button that logs a line every time it is pressed
     turns an append-only log into a click record, and the log is read for the
     launches, not for the presses.
+
+    **Both players**, because a hidden player that kept running while the
+    visible one was paused would arrive at the next cut somewhere other than
+    where it was cued - and the cue is the one thing about the incoming clip
+    that was decided in advance. Pause holds the whole machine, not the frame
+    that happens to be showing.
     """
-    player, _ = _ops()
-    if player is None:
+    return _set_play(True)
+
+
+def _set_play(running):
+    """Write Play on both players. Returns them, or None if there are none.
+
+    One function because play and pause differ by a bool and nothing else -
+    the same reason next and previous are `_step` with a sign.
+    """
+    container = _container()
+    if container is None:
         return None
-    return startup.set_par(player, "play", True)
+    players = _players(container)
+    if not players:
+        return None
+    for player in players:
+        startup.set_par(player, "play", running)
+    return players
 
 
 def pause():
@@ -109,11 +209,13 @@ def pause():
     calls `refresh_dwell()`, which is also what a hand on the parameter or a
     MIDI note writing it directly would trigger. Pausing from a fourth place
     later needs nothing added here.
+
+    A fade already in flight is **not** held. It is driven by its own Timer CHOP
+    and finishes, which is the honest behaviour: pausing mid-blend leaves a
+    blend on screen, and a machine that froze halfway between two clips would
+    be showing a frame that is not in either of them.
     """
-    player, _ = _ops()
-    if player is None:
-        return None
-    return startup.set_par(player, "play", False)
+    return _set_play(False)
 
 
 def clip_paths(table):
@@ -292,33 +394,66 @@ def now_playing():
 
 
 def _step(step):
-    """Move `step` places through the deck and play what is there.
+    """Move `step` places through the deck and cross to what is there.
 
     Both transport directions in one function, because next and previous
     differ by a sign and nothing else. Where the current position is kept is
-    still nowhere: it is read back off the player's `file` parameter every
+    still nowhere: it is read back off the live player's `file` parameter every
     time, so a rebuild, a reshuffle or a rescan cannot desynchronise a stored
     index from what is on screen.
+
+    **The clip is loaded onto the hidden player and the cross is sent at it.**
+    That is the whole of the two-player arrangement from here: this function
+    never touches the player that is showing, so the outgoing clip keeps running
+    through the blend instead of being replaced under it. Which player is hidden
+    is derived from the fade state rather than alternated by a counter - a
+    counter would be a second record of the same fact, free to disagree with the
+    cross after an interrupted fade.
+
+    The fade's start is read off the cross as it stands **now**, not assumed to
+    be settled. Press next in the middle of a fade and the new one begins from
+    whatever blend is on screen, rather than snapping to one player first.
     """
-    player, table = _ops()
-    if player is None:
+    container = _container()
+    if container is None:
+        return None
+    players = _players(container)
+    state = _fade_state(container)
+    if not players or state is None:
         return None
 
+    table = container.op(build.PLAYLIST_DAT)
     paths = clip_paths(table)
     if not paths:
         startup.report(f"[{startup.PACKAGE}] playlist is empty - nothing to play")
         return None
 
+    live = fade_target(state)
+    incoming = 1 - live
+
     order = play_order(len(paths))
     # .val rather than .eval(): the literal string the build wrote, which is
     # what the table holds. An evaluated File parameter can come back expanded
     # and would then match nothing.
-    index = step_index(order, current_index(paths, str(player.par.file.val)), step)
+    current = current_index(paths, str(players[live].par.file.val))
+    index = step_index(order, current, step)
     path = paths[index]
 
-    startup.set_par(player, "file", path)
-    fraction = _cue(player)
-    startup.set_par(player, "play", True)
+    # Written unconditionally rather than skipped when the preload already
+    # guessed right. A Movie File In TOP given the file it already has does not
+    # reopen it, so the saving is TouchDesigner's to make - and a conditional
+    # here would be this module holding an opinion about when a file counts as
+    # already loaded, which is the operator's business and not its caller's.
+    startup.set_par(players[incoming], "file", path)
+    # Cued at the cut and not at the preload. Opening the file is the slow half
+    # and that has already happened; cueing is a pulse. Cueing early would mean
+    # a random start point that the clip had then been running past for a whole
+    # dwell before anybody saw it.
+    fraction = _cue(players[incoming])
+    startup.set_par(players[incoming], "play", True)
+
+    _begin_fade(container, state, incoming)
+
     # The clip changed, so the dwell is measured from here rather than from
     # whenever the last cut happened to be. Without this the two advance
     # triggers interfere: a clip that ended early would be followed by one held
@@ -331,6 +466,151 @@ def _step(step):
         f" at {fraction:.0%}: {path}"
     )
     return path
+
+
+def fade_seconds(dwell, fade):
+    """How long a crossfade lasts, from the dwell and the fade fraction.
+
+    **Fade is a fraction of the dwell, so this is a product**, and that is the
+    one reason the fade timer's length is computed here rather than bound to a
+    parameter the way every other setting reaches its operator. A binding
+    mirrors one value; this is two of them multiplied, and the answer only has
+    to be right at the instant a fade begins.
+
+    A dwell of 0 therefore gives a fade of 0, and the cut is hard - including a
+    next press and an end-of-file advance. That follows from what the parameter
+    says it is rather than being a case anybody chose, and it leaves the bottom
+    of the dwell slider meaning one thing: nothing automatic, nothing smoothed.
+
+    Negative inputs answer 0 rather than a negative length. `Dwell` and `Fade`
+    are both clamped at the bottom on the settings COMP, so this is the belt to
+    that braces - a Timer CHOP given a negative length is a failure with no
+    obvious symptom.
+    """
+    return max(float(dwell) * float(fade), 0.0)
+
+
+def _begin_fade(container, state, incoming):
+    """Send the cross at `incoming`, over the fade the settings ask for.
+
+    Two numbers and a pulse. `start` is where the cross is at this instant, so
+    an interrupted fade continues from the picture rather than from the clip it
+    was leaving; `target` is the player being faded to, and it doubles as the
+    record of which player is live - see `fade_target`.
+
+    A fade of zero seconds writes them both to the same number, which settles
+    the cross immediately and needs no timer at all. That is not a special case
+    so much as the general one with the ramp removed: `on_fade_done` does the
+    same two things afterwards either way, so a hard cut and a slow blend leave
+    the machine in the same state.
+    """
+    seconds = fade_seconds(
+        settings.value(settings.DWELL), settings.value(settings.FADE)
+    )
+    startup.set_par(state, "const0value", _cross_value(container, incoming))
+    startup.set_par(state, "const1value", float(incoming))
+
+    if seconds <= 0:
+        on_fade_done()
+        return 0.0
+
+    timer = fade_timer()
+    if timer is None:
+        on_fade_done()
+        return 0.0
+    startup.set_par(timer, "length", seconds)
+    build.pulse(timer, "start")
+    return seconds
+
+
+def _cross_value(container, fallback):
+    """What the Cross TOP is showing right now, or `fallback` if it is missing.
+
+    The fallback is the incoming player rather than 0, so a build with no cross
+    in it still cuts - hard, and to the right clip, with a line in the log
+    saying what is not there.
+    """
+    cross = container.op(build.CROSS_TOP)
+    if cross is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.CROSS_TOP} in {container.path}"
+            " - cutting rather than fading"
+        )
+        return float(fallback)
+    return float(cross.par.cross.eval())
+
+
+def fade_timer():
+    """The Timer CHOP ramping the cross, or None with a line about it."""
+    container = _container()
+    if container is None:
+        return None
+    timer = container.op(build.FADE_TIMER_CHOP)
+    if timer is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.FADE_TIMER_CHOP} in"
+            f" {container.path} - cuts will be hard"
+        )
+    return timer
+
+
+def on_fade_done():
+    """A fade finished. Settle the cross, and load the clip after this one.
+
+    Called by the fade timer's `onDone`, and directly by `_begin_fade` when the
+    fade was zero seconds long - the same two jobs either way.
+
+    **Settling is what makes the rest of the arithmetic hold.** With `start` and
+    `target` equal, `build.CROSS_EXPR` answers that value whatever the timer's
+    fraction is doing, so nothing downstream has to be right about what a
+    finished Timer CHOP leaves in `timer_fraction`.
+
+    **The preload is the point of the phase.** The player that just went out of
+    sight is given the next clip immediately, so it has the whole of this clip's
+    dwell to open and decode it. That margin is what removes the hitch at a cut;
+    the blend only hides what is left.
+    """
+    container = _container()
+    if container is None:
+        return None
+    state = _fade_state(container)
+    if state is None:
+        return None
+
+    startup.set_par(state, "const0value", state.par.const1value.eval())
+    return _preload(container)
+
+
+def _preload(container):
+    """Give the hidden player the clip that comes next. Returns its path.
+
+    File only - not cued, not stopped. Opening the file is the slow half and the
+    only half that needs a head start; the cue is a pulse `_step` fires at the
+    cut, where it can still be random about a clip nobody has seen yet.
+
+    Silent on success, like the transport buttons: this runs once per cut and a
+    line each time would turn the log into a record of the cycle rather than of
+    the launch.
+    """
+    players = _players(container)
+    state = _fade_state(container)
+    if not players or state is None:
+        return None
+
+    table = container.op(build.PLAYLIST_DAT)
+    paths = clip_paths(table)
+    if not paths:
+        return None
+
+    live = fade_target(state)
+    order = play_order(len(paths))
+    current = current_index(paths, str(players[live].par.file.val))
+    index = step_index(order, current, 1)
+    if index is None:
+        return None
+
+    startup.set_par(players[1 - live], "file", paths[index])
+    return paths[index]
 
 
 def _cue(player):
@@ -398,22 +678,58 @@ def restart_dwell():
     return timer
 
 
-def on_loop():
-    """The clip reached its end and wrapped. Advance, or leave it looping.
+def on_loop(info_name):
+    """A clip reached its end and wrapped. Advance, or leave it looping.
 
-    Called by the CHOP Execute DAT watching `loop_frame` on the player's Info
-    CHOP. The player's Extend Right is Cycle permanently, so looping is what a
-    clip does when it runs out and this decides only whether that is the end of
-    it - both behaviours come from one network and one toggle.
+    Called by the CHOP Execute DAT watching `loop_frame` on a player's Info
+    CHOP. Extend Right is Cycle permanently on both players, so looping is what
+    a clip does when it runs out and this decides only whether that is the end
+    of it - both behaviours come from one network and one toggle.
+
+    **Only the player on screen counts.** The hidden one is decoding the next
+    clip a whole dwell before anybody sees it, and a preloaded clip shorter than
+    the dwell will wrap several times while it waits - each wrap arriving here.
+    Acting on those would advance the playlist at the speed of the shortest clip
+    in it, which reads as a player that has lost its mind rather than as a bug
+    in a watcher.
+
+    The check is `info_name` against the live player's own Info CHOP, so it
+    holds however the fade got where it is - and it is asked here rather than
+    built into the watchers, because which player is live changes every cut and
+    the watchers are built once.
 
     Worth knowing: with random cue on, a clip cued close to its own end reaches
     that end almost immediately, so advance-at-end can cut within a second of a
     cut. That is the overrun the cue deliberately does not clamp away, arriving
     where it was meant to.
     """
+    if not looped_player_is_live(info_name):
+        return None
     if not settings.value(settings.ADVANCE_ON_END):
         return None
     return next_clip()
+
+
+def looped_player_is_live(info_name):
+    """Whether that Info CHOP belongs to the player currently on screen.
+
+    Separate from `on_loop` so the question can be asked without a network, and
+    because it is the one place a watcher's identity is turned into a decision.
+    An unknown name answers False and says so: a watcher wired to an operator
+    this module has never heard of should not advance the playlist.
+    """
+    container = _container()
+    if container is None:
+        return False
+    if info_name not in build.PLAYER_INFO_CHOPS:
+        startup.report(
+            f"[{startup.PACKAGE}] loop from unknown {info_name!r}"
+            f" - have {', '.join(build.PLAYER_INFO_CHOPS)}"
+        )
+        return False
+    return build.PLAYER_INFO_CHOPS.index(info_name) == fade_target(
+        _fade_state(container)
+    )
 
 
 def on_dwell(cycle):
