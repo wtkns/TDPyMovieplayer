@@ -103,6 +103,12 @@ def pause():
     neither reports the transport's actual state - `play` on the TOP is the
     only thing that knows, and reading it is what a state-showing toggle would
     do. Worth remembering when the panel appears to lie.
+
+    **The dwell stops with it**, and not because this function stops it. Writing
+    `play` is all this does; a Parameter Execute DAT watching that parameter
+    calls `refresh_dwell()`, which is also what a hand on the parameter or a
+    MIDI note writing it directly would trigger. Pausing from a fourth place
+    later needs nothing added here.
     """
     player, _ = _ops()
     if player is None:
@@ -423,47 +429,73 @@ def on_dwell(cycle):
     module sets, so it holds however the timer was started - by the build, by a
     clip change, or by a hand on the parameter.
 
-    The dwell is re-read as well. The timer's Play follows the setting through
-    `on_dwell_change`, and those two can disagree for the frame between a
-    slider reaching 0 and the watcher running; the setting is the one that is
-    right.
+    **The run condition is then asked again**, and it is the same question
+    `refresh_dwell` asks. The timer's Play follows that answer through two
+    watchers, and a watcher runs a frame after the parameter it watches moved -
+    so a cycle can complete in the frame between a slider reaching 0, or a clip
+    being paused, and the timer being told about it. Asking here as well is what
+    keeps a paused clip from being cut away by a cycle already in flight.
     """
     if cycle < 1:
         return None
-    if settings.value(settings.DWELL) <= 0:
+
+    player, _ = _ops()
+    if player is None:
+        return None
+    if not dwell_should_run(settings.value(settings.DWELL), player.par.play.eval()):
         return None
     return next_clip()
 
 
-def on_dwell_change():
-    """Start or stop the dwell timer to match the Dwell setting.
+def dwell_should_run(dwell, clip_playing):
+    """Whether the dwell timer should be counting. Both inputs have to be true.
 
     **A dwell of 0 is the timer off, not a cut every frame**, which makes the
-    bottom of the slider a real mode rather than an accident. That is an
-    interpretation of the value rather than a view of it, so it cannot be a
-    binding - a binding mirrors a number and has no opinion about what 0 means.
-    A Parameter Execute DAT watching Dwell calls this instead, which is the same
-    shape as the clip list following the player's `file`.
+    bottom of the slider a real mode rather than an accident. And **a paused
+    clip is not counted down**: pause means hold this frame, and a player that
+    cut away from a held frame after the dwell expired would make pause mean
+    something narrower than it reads.
 
-    The previous state is read off the timer rather than remembered here, and it
-    decides two things. The clock is restarted only when the timer is being
-    turned *on*, so nudging a running dwell from 4 to 5 does not postpone the
-    cut every time the slider moves - which would make a dwell impossible to
-    reach by dragging. And the line is logged only when the mode actually
-    changed, so dragging the slider does not fill the launch log with a record
-    of the drag.
+    Both of those are *interpretations* of a parameter rather than views of one,
+    which is why neither can be a binding: a binding mirrors a value and has no
+    opinion about what it means. This function is where the opinions are, and it
+    is separate from the operator it drives so it can be read on its own.
+    """
+    return bool(dwell > 0 and clip_playing)
+
+
+def refresh_dwell():
+    """Recompute whether the dwell timer runs, from the two things that decide.
+
+    Named for `lister.refresh()` and doing the same job: recomputing a derived
+    state from its sources rather than being told what to set it to. Two
+    Parameter Execute DATs call it - one on the settings COMP's Dwell, one on the
+    player's own Play - and `build()` calls it once, because a launch is not a
+    change and neither watcher would otherwise fire.
+
+    **Nothing here restarts the clock.** That belongs to a clip change and
+    `_step()` already does it, which leaves `masterSeconds` meaning exactly one
+    thing: how long this clip has been playing, not counting time paused. Pause
+    and resume therefore continue rather than start over, which is what pause
+    means - and turning a dwell on mid-clip measures it from when the clip
+    started rather than from when the slider moved, so a clip already past the
+    dwell cuts at once instead of being granted a fresh interval.
+
+    The line is logged only when the answer changes, so dragging the slider does
+    not fill a log kept for launches with a record of the drag.
     """
     timer = dwell_timer()
     if timer is None:
         return None
+    player, _ = _ops()
+    if player is None:
+        return None
 
     dwell = settings.value(settings.DWELL)
-    running = dwell > 0
+    running = dwell_should_run(dwell, player.par.play.eval())
     was_running = bool(timer.par.play.eval())
 
     startup.set_par(timer, "play", running)
-    if running and not was_running:
-        restart_dwell()
     if running != was_running:
         startup.report(
             f"[{startup.PACKAGE}] dwell timer "

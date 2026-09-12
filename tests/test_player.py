@@ -341,24 +341,26 @@ class FakePar:
         return self.val
 
 
-class FakeTimerPars:
-    """The one parameter the dwell reads and writes."""
+class FakePars:
+    """An operator's `.par`, carrying whichever parameters a test needs."""
 
-    def __init__(self, play):
-        self.play = FakePar(play)
+    def __init__(self, **values):
+        for name, value in values.items():
+            setattr(self, name, FakePar(value))
 
 
-class FakeTimer:
-    """A Timer CHOP as far as the dwell needs one: a Play par and a clock.
+class FakeOp:
+    """An operator with a Play parameter, which is all the dwell reads.
 
-    `masterSeconds` starts at something other than 0 so a test can tell a
-    restart from a timer that happened to be there already.
+    Both operands are shaped the same: the timer's Play is what gets written and
+    the player's Play is what gets read, and neither needs anything else. The
+    timer also carries a clock, and `masterSeconds` starts at something other
+    than 0 so a test can tell a restart from a timer that was already at zero.
     """
 
-    path = "/project1/generated/dwell"
-
-    def __init__(self, play=0):
-        self.par = FakeTimerPars(play)
+    def __init__(self, path, play=0):
+        self.path = path
+        self.par = FakePars(play=play)
         self.masterSeconds = 99.0
 
 
@@ -386,6 +388,22 @@ def advanced(monkeypatch):
     calls = []
     monkeypatch.setattr(player, "next_clip", lambda: calls.append("next"))
     return calls
+
+
+@pytest.fixture
+def clip(monkeypatch):
+    """A player TOP whose Play can be moved, and no playlist behind it."""
+    node = FakeOp("/project1/generated/player", play=True)
+    monkeypatch.setattr(player, "_ops", lambda: (node, None))
+    return node
+
+
+@pytest.fixture
+def timer(monkeypatch):
+    """The dwell timer, stubbed at the lookup rather than at the container."""
+    node = FakeOp("/project1/generated/dwell")
+    monkeypatch.setattr(player, "dwell_timer", lambda: node)
+    return node
 
 
 class TestCueFraction:
@@ -442,74 +460,115 @@ class TestOnLoop:
 class TestOnDwell:
     """The dwell policy, including the cycle that is the timer starting."""
 
-    def test_the_first_cycle_beginning_is_not_a_dwell(self, setting, advanced):
+    def test_the_first_cycle_beginning_is_not_a_dwell(self, setting, clip, advanced):
         # Cycle index 0 is the timer being started. Advancing on it would cut a
         # clip the instant it was loaded, because _step restarts the clock.
         setting[settings.DWELL] = 5.0
         player.on_dwell(0)
         assert advanced == []
 
-    def test_a_later_cycle_advances(self, setting, advanced):
+    def test_a_later_cycle_advances(self, setting, clip, advanced):
         setting[settings.DWELL] = 5.0
         player.on_dwell(1)
         player.on_dwell(7)
         assert advanced == ["next", "next"]
 
-    def test_a_dwell_of_zero_advances_nothing(self, setting, advanced):
-        # The timer's Play is off at 0 so this should not be reached at all;
-        # the setting is re-read because the two can disagree for the frame
-        # between a slider reaching 0 and the watcher running.
+    def test_a_dwell_of_zero_advances_nothing(self, setting, clip, advanced):
         setting[settings.DWELL] = 0.0
         player.on_dwell(3)
         assert advanced == []
 
-    def test_a_negative_cycle_is_refused_like_zero(self, setting, advanced):
+    def test_a_paused_clip_is_not_cut_away(self, setting, clip, advanced):
+        # A cycle already in flight when the clip was paused. The timer's Play
+        # follows the pause a frame later, so the condition is asked again here -
+        # otherwise a held frame could still be cut away once.
+        setting[settings.DWELL] = 5.0
+        clip.par.play.val = False
+        player.on_dwell(3)
+        assert advanced == []
+
+    def test_a_negative_cycle_is_refused_like_zero(self, setting, clip, advanced):
         setting[settings.DWELL] = 5.0
         player.on_dwell(-1)
         assert advanced == []
 
 
-class TestOnDwellChange:
-    """Following the Dwell setting with the timer's Play, and nothing else."""
+class TestDwellShouldRun:
+    """Both inputs, as a function, because both are opinions about a value."""
 
-    @pytest.fixture
-    def timer(self, monkeypatch):
-        node = FakeTimer()
-        monkeypatch.setattr(player, "dwell_timer", lambda: node)
-        return node
+    def test_needs_a_dwell_and_a_playing_clip(self):
+        assert player.dwell_should_run(4.0, True) is True
 
-    def test_a_dwell_above_zero_starts_the_timer(self, setting, timer, silent):
+    def test_a_dwell_of_zero_is_off(self):
+        assert player.dwell_should_run(0.0, True) is False
+
+    def test_a_paused_clip_is_not_counted_down(self):
+        # What pause means: hold this frame. A player that cut away from a held
+        # frame once the dwell expired would make pause narrower than it reads.
+        assert player.dwell_should_run(4.0, False) is False
+
+    def test_neither_is_off(self):
+        assert player.dwell_should_run(0.0, False) is False
+
+    def test_answers_a_bool_from_the_floats_a_parameter_gives(self):
+        # Both arguments arrive from Par.eval(), so both can be floats - and the
+        # answer is assigned to a Toggle, which should get True rather than 1.0.
+        assert player.dwell_should_run(4.0, 1.0) is True
+        assert player.dwell_should_run(4.0, 0.0) is False
+
+
+class TestRefreshDwell:
+    """Recomputing the timer's Play from both inputs, whichever one moved."""
+
+    def test_a_dwell_above_zero_starts_the_timer(self, setting, timer, clip, silent):
         setting[settings.DWELL] = 4.0
-        player.on_dwell_change()
+        player.refresh_dwell()
         assert timer.par.play.val is True
-        assert timer.masterSeconds == 0
 
-    def test_a_dwell_of_zero_stops_it(self, setting, timer, silent):
+    def test_a_dwell_of_zero_stops_it(self, setting, timer, clip, silent):
         timer.par.play.val = True
         setting[settings.DWELL] = 0.0
-        player.on_dwell_change()
+        player.refresh_dwell()
         assert timer.par.play.val is False
 
-    def test_an_already_running_timer_keeps_its_clock(self, setting, timer, silent):
-        # The reason the previous state is read rather than assumed: nudging a
-        # running dwell from 4 to 5 must not postpone the cut, or a dwell could
-        # never be reached by dragging the slider.
+    def test_a_paused_clip_stops_it(self, setting, timer, clip, silent):
+        # The whole point of the second watcher: the dwell is untouched and the
+        # timer stops anyway, because the clip is not playing.
         timer.par.play.val = True
-        setting[settings.DWELL] = 5.0
-        player.on_dwell_change()
+        setting[settings.DWELL] = 4.0
+        clip.par.play.val = False
+        player.refresh_dwell()
+        assert timer.par.play.val is False
+
+    def test_resuming_continues_rather_than_starting_over(
+        self, setting, timer, clip, silent
+    ):
+        # Nothing here restarts the clock - that belongs to a clip change, and
+        # `_step` does it. So pause and resume continue, which is what pause
+        # means; `masterSeconds` keeps meaning "how long this clip has played".
+        setting[settings.DWELL] = 4.0
+        clip.par.play.val = False
+        player.refresh_dwell()
+        clip.par.play.val = True
+        player.refresh_dwell()
+        assert timer.par.play.val is True
         assert timer.masterSeconds == 99.0
 
-    def test_only_a_change_of_mode_is_logged(self, setting, timer, silent):
+    def test_only_a_change_of_mode_is_logged(self, setting, timer, clip, silent):
         setting[settings.DWELL] = 4.0
-        player.on_dwell_change()
+        player.refresh_dwell()
         assert len(silent) == 1
         # Second call changes nothing, so it says nothing - otherwise dragging
         # the slider would fill a log kept for launches with a record of a drag.
-        player.on_dwell_change()
+        player.refresh_dwell()
         assert len(silent) == 1
 
-    def test_a_missing_timer_is_not_an_exception(self, setting, monkeypatch):
+    def test_a_missing_timer_is_not_an_exception(self, setting, clip, monkeypatch):
         # `dwell_timer` has already said which node is missing; this only has to
         # not take the Parameter Execute callback down with it.
         monkeypatch.setattr(player, "dwell_timer", lambda: None)
-        assert player.on_dwell_change() is None
+        assert player.refresh_dwell() is None
+
+    def test_a_missing_player_is_not_an_exception(self, setting, timer, monkeypatch):
+        monkeypatch.setattr(player, "_ops", lambda: (None, None))
+        assert player.refresh_dwell() is None
