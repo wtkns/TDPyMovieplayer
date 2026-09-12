@@ -171,16 +171,51 @@ class TestSliderWidth:
         assert build._slider_width() == 0
 
 
+class FakeChannel:
+    """A `td.Channel` as far as this expression is concerned: `eval()`, no more.
+
+    Deliberately **not** a float and deliberately not formattable. The first
+    version of these tests used plain floats and passed while both readouts sat
+    in error in TouchDesigner, because a float supports `:.1f` and a Channel
+    does not. A fake that accepts more than the real object is not a test.
+    """
+
+    def __init__(self, value):
+        self.value = value
+
+    def eval(self, index=None):
+        return self.value
+
+
+class FakeChannels:
+    """An Info CHOP's `[]`, answering a FakeChannel per channel name."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def __getitem__(self, name):
+        return FakeChannel(self.values[name])
+
+
 class TestDiagnosticsExpression:
     """The readout's text, which is a Python expression TouchDesigner evaluates.
 
     Worth testing at a prompt precisely because its failure mode in the app is
-    quiet: a malformed expression leaves the parameter in error and the strip
-    blank, which looks like a player with nothing to report rather than like a
-    broken readout.
+    quiet from the panel's side: the parameter goes into error and the strip
+    stays blank, which reads as a player with nothing to report rather than as a
+    readout that never worked.
     """
 
     PATH = "/project1/generated/playerAInfo"
+
+    VALUES = {
+        "hardware_decode": 1.0,
+        "pre_read_misses": 3.0,
+        "num_pre_read_frames": 12.0,
+        "last_frame_decode_time": 4.25,
+        "last_gpu_upload_time": 0.5,
+        "has_decode_errors": 0.0,
+    }
 
     def test_it_is_a_valid_python_expression(self):
         # The whole point. compile() in eval mode is the same parse
@@ -193,18 +228,32 @@ class TestDiagnosticsExpression:
         # than assumed - the f-string nesting here is easy to get subtly wrong
         # and impossible to see wrong in a screenshot.
         expression = build._diagnostics_expression("playerA", self.PATH)
-        channels = {
-            "hardware_decode": 1.0,
-            "pre_read_misses": 3.0,
-            "num_pre_read_frames": 12.0,
-            "last_frame_decode_time": 4.25,
-            "last_gpu_upload_time": 0.5,
-            "has_decode_errors": 0.0,
-        }
-        result = eval(expression, {"op": lambda path: channels})
+        result = eval(expression, {"op": lambda path: FakeChannels(self.VALUES)})
         assert result == (
             "playerA  hw 1 miss 3 buf 12 dec 4.2 gpu 0.5 err 0"
         )
+
+    def test_every_channel_is_evaluated_rather_than_formatted_directly(self):
+        # The bug this class failed to catch the first time, now the thing it
+        # exists for. `op(chop)['chan']` answers a td.Channel, and formatting
+        # one raises "unsupported format string passed to
+        # td.Channel.__format__" - which both readouts did in TouchDesigner
+        # while these tests were green, because the fake handed back floats.
+        # Floats format fine and are not what the app has.
+        #
+        # Asserted on the text rather than by catching an exception: the
+        # question is whether every reference goes through Channel.eval(), and
+        # one that did not would simply format the object it was given.
+        expression = build._diagnostics_expression("playerA", self.PATH)
+        assert expression.count(".eval():") == len(build.DIAGNOSTIC_CHANNELS)
+
+    def test_it_does_not_work_against_plain_numbers(self):
+        # The other half of the same point, from the opposite direction: if
+        # this ever passes, the expression has stopped requiring the shape the
+        # app actually hands it and the fake above has stopped being a fake.
+        expression = build._diagnostics_expression("playerA", self.PATH)
+        with pytest.raises(AttributeError):
+            eval(expression, {"op": lambda path: self.VALUES})
 
     def test_it_names_the_info_chop_it_was_given(self):
         # The dependency TouchDesigner tracks. If the path stopped appearing in

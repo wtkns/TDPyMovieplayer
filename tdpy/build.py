@@ -503,9 +503,16 @@ def _diagnostics_expression(label, info_path):
     An f-string, because a parameter expression is an ordinary Python
     expression. The path is baked in at build time from the Info CHOP's real
     `path`, so nothing here depends on where the network was built.
+
+    **`.eval()` is not decoration.** `op(chop)['channel']` answers a
+    `td.Channel`, not a number, and formatting one raises *"unsupported format
+    string passed to td.Channel.__format__"* - which is what the first version
+    of this did on both readouts. The Channel class documents
+    `eval(index) -> float`, evaluating "at the current index based on the
+    current time" when given no argument, and that is the number wanted here.
     """
     parts = " ".join(
-        f"{name} {{op({info_path!r})[{channel!r}]:.{places}f}}"
+        f"{name} {{op({info_path!r})[{channel!r}].eval():.{places}f}}"
         for channel, name, places in DIAGNOSTIC_CHANNELS
     )
     return f'f"{label}  {parts}"'
