@@ -24,6 +24,10 @@
 - **`COMP.create()` appends a digit to the name**, even when the name is free. Use `startup.create()` anywhere the new node's name is referred to again.
 - **Shared `tdpy` files belong upstream.** Anything in the generator's VERBATIM manifest is owned by `300-Code/330 - TouchDesigner/0010 - TouchDesigner-Python` — change it there and copy it down, never edit it project-side.
 
+## Running a control
+
+- **Clear `__pycache__` between a mutation and its restore.** CPython decides a `.pyc` is stale from the source's **mtime and size**, and a control that swaps one character for another — `next_into(1)` for `next_into(0)`, a lamp index, a range bound — changes neither the size nor, within the same second, the mtime. The restored file then runs the mutated bytecode, and the test that correctly failed goes on failing after the mutation is gone. Observed 2026-09-13, where it survived two further controls before being noticed. `find . -name __pycache__ -type d -not -path "./*_vEnv/*" -exec rm -rf {} +` before each run, and confirm the baseline comes back green at the end — **a control run is not finished until the restore has been shown to pass.**
+
 ## Handover
 
 When a surface is built ahead of the engine behind it, **name the dead controls** in the handover. Otherwise the intended behaviour comes back as a bug report.

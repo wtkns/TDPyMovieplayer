@@ -38,7 +38,8 @@ class TestSpecification:
             settings.RANDOM_CUE,
             settings.DWELL,
             settings.FADE,
-            settings.SPEED,
+            settings.SPEED_A,
+            settings.SPEED_B,
         )
         assert [settings.spec(name).name for name in named] == list(named)
         assert silent == []
@@ -52,11 +53,14 @@ class TestSpecification:
             settings.RANDOM_CUE,
             settings.DWELL,
             settings.FADE,
-            settings.SPEED,
+            settings.SPEED_A,
+            settings.SPEED_B,
             settings.LEVEL_A,
             settings.PAN_A,
             settings.LEVEL_B,
             settings.PAN_B,
+            settings.DWELL_CURVE,
+            settings.DWELL_ON,
         }
         assert {item.name for item in settings.SETTINGS} == named
 
@@ -73,7 +77,7 @@ class TestSpecification:
 
     def test_only_a_bounded_setting_clamps_at_the_top(self):
         # Speed's slider stopping at 4 is a convenience; a typed 8 should take.
-        speed = settings.spec(settings.SPEED)
+        speed = settings.spec(settings.SPEED_A)
         assert speed.bounded is False
         assert settings.attributes(speed)["clampMax"] is False
         assert settings.attributes(speed)["clampMin"] is True
@@ -117,13 +121,24 @@ class TestDefaults:
     def test_a_launch_runs_the_files_as_they_are(self):
         # No random cue point, and speed 1 - the plain reading of the folder.
         assert settings.spec(settings.RANDOM_CUE).default is False
-        assert settings.spec(settings.SPEED).default == 1.0
+        for name in settings.SPEEDS:
+            assert settings.spec(name).default == 1.0
 
-    def test_a_dwell_of_zero_is_the_timer_switched_off(self):
-        # Not a very fast cut: 0 is the bottom of the slider and it is a mode.
-        # Phase 4c reads it that way, and this is where that is written down.
-        assert settings.spec(settings.DWELL).default == 0.0
-        assert settings.spec(settings.DWELL).minimum == 0.0
+    def test_the_dwell_is_a_duration_and_never_a_mode(self):
+        # Was "a dwell of zero is the timer switched off". Reversed 2026-09-13:
+        # the switch is its own setting, so the duration's range is entirely
+        # durations. The bottom is one frame of 30fps media, which is what
+        # every clip in this project measures at - nothing shorter can put a
+        # different picture on screen.
+        dwell = settings.spec(settings.DWELL)
+        assert dwell.minimum == pytest.approx(1.0 / 30.0)
+        assert dwell.maximum == 60.0
+        assert dwell.minimum > 0
+
+    def test_nothing_cuts_by_itself_at_launch(self):
+        # The mode that used to be the bottom of the dwell, now a toggle - and
+        # still off at launch, like every other automatic behaviour here.
+        assert settings.spec(settings.DWELL_ON).default is False
 
     def test_a_clip_that_ends_moves_on(self):
         # The one automatic behaviour that is on at launch, and it has to be:
@@ -134,16 +149,18 @@ class TestDefaults:
 class TestAttributes:
     def test_a_float_is_clamped_at_the_bottom_and_not_at_the_top(self):
         # The slider stops at the maximum; the parameter does not. A speed of 8
-        # can be typed into the Parameter COMP, a speed of -1 cannot be reached
-        # at all, and neither of those is an accident.
-        attributes = settings.attributes(settings.spec(settings.SPEED))
+        # can be typed into the Parameter COMP, and a speed of -3 cannot be
+        # reached at all - the bottom of a speed range is a real limit now that
+        # the range runs below zero, where -2 is twice backwards and anything
+        # past it is only faster backwards.
+        attributes = settings.attributes(settings.spec(settings.SPEED_A))
         assert attributes["clampMin"] is True
         assert attributes["clampMax"] is False
 
     def test_a_float_carries_the_slider_range_that_makes_it_draw_as_one(self):
-        attributes = settings.attributes(settings.spec(settings.DWELL))
-        assert (attributes["normMin"], attributes["normMax"]) == (0.0, 60.0)
-        assert (attributes["min"], attributes["max"]) == (0.0, 60.0)
+        attributes = settings.attributes(settings.spec(settings.FADE))
+        assert (attributes["normMin"], attributes["normMax"]) == (0.0, 1.0)
+        assert (attributes["min"], attributes["max"]) == (0.0, 1.0)
 
     def test_a_toggle_is_given_a_default_and_nothing_else(self):
         # A range on a toggle is meaningless, and normMin on one is an

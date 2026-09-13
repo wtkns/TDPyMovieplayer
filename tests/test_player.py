@@ -265,6 +265,36 @@ class TestCommand:
         assert "toggle" in player.COMMANDS
         assert "toggle" not in names
 
+    def test_the_per_deck_commands_have_no_panel_button_either(self):
+        # Four more commands with no button, for the same reason `toggle` has
+        # none: they exist because the controller has a pair of buttons per
+        # channel strip. Adding a panel button for each would double the
+        # transport row to say what the two decks already say on screen.
+        from tdpy import build
+
+        names = {name for name, _ in build.CONTROL_BUTTONS}
+        for name in ("toggle_a", "toggle_b", "next_a", "next_b"):
+            assert name in player.COMMANDS, name
+            assert name not in names, name
+
+    def test_each_per_deck_command_addresses_its_own_deck(self, monkeypatch):
+        # The failure this catches is a copy-paste: two entries in COMMANDS
+        # that both reach player 0. Nothing at runtime would report it - the
+        # B button would simply behave like the A button, which reads as a
+        # controller-mapping problem rather than a table problem.
+        toggled = []
+        stepped = []
+        monkeypatch.setattr(player, "toggle_at", toggled.append)
+        monkeypatch.setattr(player, "next_into", stepped.append)
+
+        player.command("toggle_a")
+        player.command("toggle_b")
+        player.command("next_a")
+        player.command("next_b")
+
+        assert toggled == [0, 1]
+        assert stepped == [0, 1]
+
     def test_an_unknown_command_reports_rather_than_raises(self, silent):
         assert player.command("rewind") is None
         assert len(silent) == 1
@@ -388,8 +418,10 @@ def setting(monkeypatch):
     values = {
         settings.ADVANCE_ON_END: True,
         settings.RANDOM_CUE: False,
-        settings.DWELL: 0.0,
-        settings.SPEED: 1.0,
+        settings.DWELL: 4.0,
+        settings.DWELL_ON: False,
+        settings.SPEED_A: 1.0,
+        settings.SPEED_B: 1.0,
     }
     monkeypatch.setattr(settings, "value", values.get)
     return values
@@ -635,18 +667,21 @@ class TestOnDwell:
     def test_the_first_cycle_beginning_is_not_a_dwell(self, setting, clip, advanced):
         # Cycle index 0 is the timer being started. Advancing on it would cut a
         # clip the instant it was loaded, because _step restarts the clock.
-        setting[settings.DWELL] = 5.0
+        setting[settings.DWELL_ON] = True
         player.on_dwell(0)
         assert advanced == []
 
     def test_a_later_cycle_advances(self, setting, clip, advanced):
-        setting[settings.DWELL] = 5.0
+        setting[settings.DWELL_ON] = True
         player.on_dwell(1)
         player.on_dwell(7)
         assert advanced == ["next", "next"]
 
-    def test_a_dwell_of_zero_advances_nothing(self, setting, clip, advanced):
-        setting[settings.DWELL] = 0.0
+    def test_the_switch_off_advances_nothing(self, setting, clip, advanced):
+        # Was "a dwell of zero advances nothing". The duration no longer
+        # carries the mode - 0 is not even in its range any more, since the
+        # bottom of the fader is one frame of 30fps media.
+        setting[settings.DWELL_ON] = False
         player.on_dwell(3)
         assert advanced == []
 
@@ -654,60 +689,85 @@ class TestOnDwell:
         # A cycle already in flight when the clip was paused. The timer's Play
         # follows the pause a frame later, so the condition is asked again here -
         # otherwise a held frame could still be cut away once.
-        setting[settings.DWELL] = 5.0
+        setting[settings.DWELL_ON] = True
         clip.par.play.val = False
         player.on_dwell(3)
         assert advanced == []
 
     def test_a_negative_cycle_is_refused_like_zero(self, setting, clip, advanced):
-        setting[settings.DWELL] = 5.0
+        setting[settings.DWELL_ON] = True
         player.on_dwell(-1)
         assert advanced == []
 
 
 class TestDwellShouldRun:
-    """Both inputs, as a function, because both are opinions about a value."""
+    """Both inputs, as a function, because both are opinions about a value.
 
-    def test_needs_a_dwell_and_a_playing_clip(self):
-        assert player.dwell_should_run(4.0, True) is True
+    The first input used to be the dwell *duration*, read as off when it was 0.
+    It is the switch now. The duration says how long and no longer says
+    whether, which is what let the bottom of the fader become one frame of
+    30fps media instead of the timer stopping.
+    """
 
-    def test_a_dwell_of_zero_is_off(self):
-        assert player.dwell_should_run(0.0, True) is False
+    def test_needs_the_switch_and_a_playing_clip(self):
+        assert player.dwell_should_run(True, True) is True
+
+    def test_the_switch_off_is_off(self):
+        assert player.dwell_should_run(False, True) is False
 
     def test_a_paused_clip_is_not_counted_down(self):
         # What pause means: hold this frame. A player that cut away from a held
         # frame once the dwell expired would make pause narrower than it reads.
-        assert player.dwell_should_run(4.0, False) is False
+        assert player.dwell_should_run(True, False) is False
 
     def test_neither_is_off(self):
-        assert player.dwell_should_run(0.0, False) is False
+        assert player.dwell_should_run(False, False) is False
+
+    def test_the_duration_is_not_an_input_at_all(self):
+        # The whole of the split, as one assertion: the shortest dwell the
+        # fader reaches runs the timer, where the old arrangement would have
+        # read a small number as heading towards off. The duration is not
+        # passed here because this function no longer has an opinion about it.
+        assert player.dwell_should_run(True, True) is True
 
     def test_answers_a_bool_from_the_floats_a_parameter_gives(self):
         # Both arguments arrive from Par.eval(), so both can be floats - and the
         # answer is assigned to a Toggle, which should get True rather than 1.0.
-        assert player.dwell_should_run(4.0, 1.0) is True
-        assert player.dwell_should_run(4.0, 0.0) is False
+        assert player.dwell_should_run(1.0, 1.0) is True
+        assert player.dwell_should_run(1.0, 0.0) is False
+        assert player.dwell_should_run(0.0, 1.0) is False
 
 
 class TestRefreshDwell:
     """Recomputing the timer's Play from both inputs, whichever one moved."""
 
-    def test_a_dwell_above_zero_starts_the_timer(self, setting, timer, clip, silent):
-        setting[settings.DWELL] = 4.0
+    def test_the_switch_on_starts_the_timer(self, setting, timer, clip, silent):
+        setting[settings.DWELL_ON] = True
         player.refresh_dwell()
         assert timer.par.play.val is True
 
-    def test_a_dwell_of_zero_stops_it(self, setting, timer, clip, silent):
+    def test_the_switch_off_stops_it(self, setting, timer, clip, silent):
         timer.par.play.val = True
-        setting[settings.DWELL] = 0.0
+        setting[settings.DWELL_ON] = False
         player.refresh_dwell()
         assert timer.par.play.val is False
+
+    def test_a_short_dwell_is_a_fast_cut_and_not_a_stopped_timer(
+        self, setting, timer, clip, silent
+    ):
+        # The reversal the split was for. The shortest dwell reachable on the
+        # fader used to be the timer switched off; it is now one frame, and the
+        # timer runs.
+        setting[settings.DWELL_ON] = True
+        setting[settings.DWELL] = 1.0 / 30.0
+        player.refresh_dwell()
+        assert timer.par.play.val is True
 
     def test_a_paused_clip_stops_it(self, setting, timer, clip, silent):
         # The whole point of the second watcher: the dwell is untouched and the
         # timer stops anyway, because the clip is not playing.
         timer.par.play.val = True
-        setting[settings.DWELL] = 4.0
+        setting[settings.DWELL_ON] = True
         clip.par.play.val = False
         player.refresh_dwell()
         assert timer.par.play.val is False
@@ -718,7 +778,7 @@ class TestRefreshDwell:
         # Nothing here restarts the clock - that belongs to a clip change, and
         # `_step` does it. So pause and resume continue, which is what pause
         # means; `masterSeconds` keeps meaning "how long this clip has played".
-        setting[settings.DWELL] = 4.0
+        setting[settings.DWELL_ON] = True
         clip.par.play.val = False
         player.refresh_dwell()
         clip.par.play.val = True
@@ -727,7 +787,7 @@ class TestRefreshDwell:
         assert timer.masterSeconds == 99.0
 
     def test_only_a_change_of_mode_is_logged(self, setting, timer, clip, silent):
-        setting[settings.DWELL] = 4.0
+        setting[settings.DWELL_ON] = True
         player.refresh_dwell()
         assert len(silent) == 1
         # Second call changes nothing, so it says nothing - otherwise dragging

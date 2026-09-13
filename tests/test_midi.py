@@ -131,9 +131,125 @@ class TestTargetValue:
         # The property this module is built around: no number that
         # settings.SETTINGS already holds is copied into the map. Move the
         # maximum and the knob has to follow with nothing edited here.
-        speed = settings.spec(settings.SPEED)
+        speed = settings.spec(settings.SPEED_A)
         widened = speed._replace(maximum=speed.maximum * 2)
         assert midi.target_value(widened, midi.FULL) == speed.maximum * 2
+
+    def test_normal_speed_sits_at_the_middle_of_a_knob(self):
+        # Why the speed range is -2 to 4 rather than the symmetric -2 to 2 it
+        # was first asked for: the midpoint of the range is where a knob's
+        # centre detent lands, and 1 - ordinary playback - is what should be
+        # there. A symmetric range would put 0 at the detent, which is a frozen
+        # frame.
+        #
+        # 1.0 written as a literal, not as `spec.default`: the claim is about
+        # where normal speed falls on the hardware, and comparing the range's
+        # midpoint against the default it was chosen to match would be the same
+        # number on both sides.
+        for name in settings.SPEEDS:
+            speed = settings.spec(name)
+            assert (speed.minimum + speed.maximum) / 2 == 1.0, name
+
+    def test_a_knob_at_its_detent_is_within_a_hair_of_normal_speed(self):
+        # The residue of doing it with 128 steps: the exact midpoint falls
+        # between CC 63 and 64 and neither is reachable, so the detent gives
+        # 0.976 or 1.024 rather than 1. Recorded rather than fixed - a 2%
+        # speed error is not audible or visible, and snapping would put a dead
+        # zone in the middle of the knob.
+        speed = settings.spec(settings.SPEED_A)
+        for value in (midi.FULL // 2, midi.FULL // 2 + 1):
+            assert abs(midi.target_value(speed, value) - 1.0) < 0.03
+
+    def test_a_knob_at_the_bottom_plays_backwards(self):
+        # The Movie File In TOP's help: "Negative values will play the movie
+        # backwards." -2 is the literal the parameter receives at CC 0.
+        assert midi.target_value(settings.spec(settings.SPEED_A), 0) == -2.0
+
+    def test_a_pan_knob_sweeps_the_whole_field(self):
+        for name in (settings.PAN_A, settings.PAN_B):
+            pan = settings.spec(name)
+            assert midi.target_value(pan, 0) == 0.0
+            assert midi.target_value(pan, midi.FULL) == 1.0
+
+    def test_an_exponent_of_one_is_the_even_sweep(self):
+        # The anchor the whole family hangs off: raising a fraction to the
+        # first power changes nothing, so a curve of 1 and no curve at all are
+        # the same code path rather than two.
+        dwell = settings.spec(settings.DWELL)
+        for cc in (0, 32, 64, 96, 127):
+            assert midi.target_value(dwell, cc, exponent=1.0) == pytest.approx(
+                midi.target_value(dwell, cc)
+            )
+
+    def test_the_cubed_dwell_reaches_both_ends_of_its_range(self):
+        # A taper must not cost the range its ends. The bottom is one frame of
+        # 30fps media and the top is a minute; a curve that fell short of
+        # either would have traded reach for resolution.
+        dwell = settings.spec(settings.DWELL)
+        assert midi.target_value(dwell, 0, exponent=3.0) == pytest.approx(1 / 30)
+        assert midi.target_value(dwell, midi.FULL, exponent=3.0) == 60.0
+
+    def test_the_bottom_of_the_dwell_fader_is_one_frame_and_not_a_stop(self):
+        # The reversal, as the number that goes to the Timer CHOP. This used to
+        # be 0, which the engine read as the timer off - so the fastest cutting
+        # and no cutting at all were adjacent positions on one fader.
+        dwell = settings.spec(settings.DWELL)
+        assert midi.target_value(dwell, 0, exponent=3.0) > 0
+        assert midi.target_value(dwell, 0, exponent=3.0) == pytest.approx(
+            0.0333, abs=0.0005
+        )
+
+    def test_the_cubed_dwell_spends_a_quarter_of_the_fader_below_one_second(self):
+        # The request, as a number. Written as literal CC positions and
+        # literal seconds rather than derived from the curve, so a changed
+        # exponent has to walk past this rather than moving the goalposts
+        # with it: at cubed, CC 32 is about a second.
+        dwell = settings.spec(settings.DWELL)
+        assert midi.target_value(dwell, 32, exponent=3.0) == pytest.approx(
+            0.99, abs=0.02
+        )
+        assert midi.target_value(dwell, 64, exponent=3.0) == pytest.approx(
+            7.7, abs=0.1
+        )
+
+    def test_the_taper_gives_the_bottom_more_travel_than_the_top(self):
+        # The property that was actually asked for, stated as the comparison
+        # rather than as two magic numbers: 0-1s should get more of the fader
+        # than 20-40s does. Linear fails this and cubed passes, which is why
+        # squared was not enough - it reverses the ratio only partway.
+        dwell = settings.spec(settings.DWELL)
+
+        def steps(low, high, exponent):
+            return sum(
+                1 for cc in range(midi.FULL + 1)
+                if low <= midi.target_value(dwell, cc, exponent=exponent) < high
+            )
+
+        assert steps(0, 1, 3.0) > steps(20, 40, 3.0)
+        assert steps(0, 1, 1.0) < steps(20, 40, 1.0)
+
+    def test_a_curveless_setting_sweeps_evenly(self):
+        # Every setting but the dwell. Pan in particular must stay even, or
+        # centre stops being the middle of the knob.
+        assert settings.spec(settings.PAN_A).curve is None
+        assert midi.curve_exponent(settings.spec(settings.PAN_A)) == 1.0
+
+    def test_the_dwell_takes_its_exponent_from_another_setting(self, monkeypatch):
+        # Not a constant in this module: the point of the indirection is that a
+        # knob can be put on the exponent later without touching the map.
+        dwell = settings.spec(settings.DWELL)
+        assert dwell.curve == settings.DWELL_CURVE
+        monkeypatch.setattr(settings, "value", lambda name: 2.0)
+        assert midi.curve_exponent(dwell) == 2.0
+
+    def test_an_exponent_of_zero_does_not_peg_the_fader_at_maximum(self):
+        # `0 ** 0` is 1 in Python, so an unclamped exponent of 0 would make
+        # every position answer the top of the range - a fader that reads full
+        # everywhere and does not look broken. The parameter is clamped at 1;
+        # this is the guard that does not depend on that being true.
+        dwell = settings.spec(settings.DWELL)
+        assert midi.target_value(dwell, 0, exponent=0.0) == pytest.approx(1 / 30)
+        assert midi.target_value(dwell, 64, exponent=0.0) < 60.0
 
     def test_a_toggle_flips_what_it_is_given(self):
         toggle = settings.spec(settings.RANDOM_CUE)
@@ -270,8 +386,13 @@ class TestDeviceTable:
 class TestLights:
     """The button LEDs - views of the machine, not state of their own."""
 
-    BOTH = {"playing": True, "fading": True}
-    NEITHER = {"playing": False, "fading": False}
+    #: Every state name a lamp asks for, all true and all false. Derived from
+    #: LIGHTS rather than written out, so a lamp added to the table is covered
+    #: by these without this class being edited - the previous version listed
+    #: the two states by hand and every one of these tests broke when the
+    #: surface went from one deck to two.
+    BOTH = {lamp.state: True for lamp in midi.LIGHTS}
+    NEITHER = {lamp.state: False for lamp in midi.LIGHTS}
 
     def test_every_lamp_is_written_on_a_refresh(self):
         assert len(midi.light_messages(self.BOTH)) == len(midi.LIGHTS)
@@ -284,12 +405,19 @@ class TestLights:
         sent = dict(midi.light_messages(self.NEITHER))
         assert set(sent.values()) == {midi.LIGHT_OFF}
 
-    def test_the_two_lamps_are_independent(self):
-        sent = dict(midi.light_messages({"playing": True, "fading": False}))
-        assert sent[42] == midi.LIGHT_ON
-        assert sent[74] == midi.LIGHT_OFF
+    def test_each_lamp_answers_only_its_own_state(self):
+        # One state true at a time, and only that lamp lights. A lamp reading
+        # the wrong state is the failure that looks like a wiring mistake on
+        # the controller rather than a table with two rows the same way round.
+        for lamp in midi.LIGHTS:
+            states = dict(self.NEITHER, **{lamp.state: True})
+            sent = dict(midi.light_messages(states))
+            assert sent[lamp.index] == 127, lamp
+            for other in midi.LIGHTS:
+                if other.index != lamp.index:
+                    assert sent[other.index] == 0, (lamp, other)
 
-    def test_the_pause_lamp_is_lit_while_playing(self):
+    def test_the_pause_lamp_is_lit_while_its_own_deck_runs(self):
         # The direction was a decision rather than an accident: lit means
         # running, dark means held.
         #
@@ -298,16 +426,22 @@ class TestLights:
         # with the same constants that produced it, which made it a test of
         # self-consistency - it stayed green with the two swapped. 127 is what
         # actually goes down the wire and lights the lamp.
-        playing = dict(midi.light_messages({"playing": True, "fading": False}))
-        paused = dict(midi.light_messages({"playing": False, "fading": False}))
-        assert playing[42] == 127
-        assert paused[42] == 0
+        running = dict(midi.light_messages(dict(self.NEITHER, playing_a=True)))
+        held = dict(midi.light_messages(dict(self.NEITHER, playing_a=False)))
+        assert running[42] == 127
+        assert held[42] == 0
 
-    def test_the_fade_lamp_is_lit_while_fading(self):
-        fading = dict(midi.light_messages({"playing": True, "fading": True}))
-        settled = dict(midi.light_messages({"playing": True, "fading": False}))
-        assert fading[74] == 127
-        assert settled[74] == 0
+    def test_one_deck_running_does_not_light_the_other(self):
+        # The whole point of the surface going per-deck. Player A paused while
+        # B runs is a state the single-lamp version could not show at all.
+        sent = dict(midi.light_messages(dict(self.NEITHER, playing_b=True)))
+        assert sent[42] == 0
+        assert sent[43] == 127
+
+    def test_the_live_lamp_follows_the_deck_the_cross_settles_on(self):
+        sent = dict(midi.light_messages(dict(self.NEITHER, live_b=True)))
+        assert sent[74] == 0
+        assert sent[75] == 127
 
     def test_an_unknown_state_is_reported_and_skipped(self, silent, monkeypatch):
         # A light stuck on is worse than a light that never comes on, so a lamp
@@ -335,21 +469,46 @@ class TestLights:
     def test_light_states_answers_every_state_a_lamp_asks_for(self, monkeypatch):
         # The two tables are written in different places and this is where they
         # have to agree. Faked because the real ones read the network.
-        monkeypatch.setattr(player, "playing", lambda: True)
-        monkeypatch.setattr(player, "is_fading", lambda: False)
+        monkeypatch.setattr(player, "playing_at", lambda index: True)
+        monkeypatch.setattr(player, "is_live", lambda index: False)
         states = midi.light_states()
         for lamp in midi.LIGHTS:
             assert lamp.state in states
+
+    def test_light_states_asks_each_deck_about_itself(self, monkeypatch):
+        # A per-deck reading that passed the same index twice would light both
+        # lamps together and look like a controller fault. The doubles record
+        # which index they were handed rather than what they were asked.
+        asked = []
+        monkeypatch.setattr(player, "playing_at", lambda index: asked.append(index))
+        monkeypatch.setattr(player, "is_live", lambda index: False)
+        midi.light_states()
+        assert asked == [0, 1]
 
 
 class TestTheMapIsHonest:
     def test_it_holds_the_controls_the_learn_pass_found(self, monkeypatch):
         # Replaces the placeholder that asserted MAP was empty, which existed
         # so that a map invented from a chart could not quietly pass as one
-        # that had been measured. These three were read off the log on
-        # 2026-09-12 with the controller in front of the listener.
+        # that had been measured. Read off the device rather than off a chart:
+        # five controls on 2026-09-12, extended to two full channel strips on
+        # 2026-09-13 when the mixer gave column 2 something to drive.
         monkeypatch.undo()
-        assert {entry.index for entry in midi.MAP} == {78, 50, 30, 42, 74}
+        assert {entry.index for entry in midi.MAP} == {
+            14, 30, 50, 78, 42, 74,   # column 1 - player A
+            15, 31, 51, 79, 43, 75,   # column 2 - player B
+        }
+
+    def test_the_two_columns_hold_the_same_controls_one_deck_apart(self, monkeypatch):
+        # Column 2's index is column 1's plus one on every row of the device.
+        # Worth pinning because 74 was given for both Next buttons when the
+        # map was dictated, and a duplicated key does not raise - control_for
+        # returns the first match and the second control simply goes quiet.
+        monkeypatch.undo()
+        indexes = {entry.index for entry in midi.MAP}
+        for first in (14, 30, 50, 78, 42, 74):
+            assert first in indexes
+            assert first + 1 in indexes
 
     def test_no_button_is_mapped_on_its_release(self, monkeypatch):
         # The device sends Note On 127 then Note Off 0 for every press. is_press

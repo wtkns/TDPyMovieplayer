@@ -249,6 +249,90 @@ def playing():
     return bool(player.par.play.eval())
 
 
+def player_at(index):
+    """One player by its index in `build.PLAYER_TOPS`, or None.
+
+    The per-deck controls all need this and all need it to fail the same way -
+    a controller button for a player that is not there should cost a line, not
+    an exception inside a MIDI callback.
+    """
+    container = _container()
+    if container is None:
+        return None
+    players = _players(container)
+    if not 0 <= index < len(players):
+        startup.report(
+            f"[{startup.PACKAGE}] no player {index} - there are {len(players)}"
+        )
+        return None
+    return players[index]
+
+
+def playing_at(index):
+    """Whether that player is running. False if it is not there."""
+    player = player_at(index)
+    if player is None:
+        return False
+    return bool(player.par.play.eval())
+
+
+def toggle_at(index):
+    """Pause or resume **one** player. Returns its new state, or None.
+
+    The per-deck version of `toggle`, and the two are deliberately different
+    things rather than one generalised over the other. `toggle` holds the whole
+    machine; this holds one deck while the other keeps going.
+
+    **What it does to the hidden deck is worth knowing before pressing it.**
+    `_step` writes `play = True` on the incoming player at every cut, so a deck
+    paused while it is hidden starts again the moment the crossfade reaches it.
+    That is not a bug being tolerated: the incoming clip has just been cued and
+    a cut that landed on a frozen frame would be a cut to nothing. The button
+    is therefore a hold on the deck you can see, and a no-op with a delay on
+    the one you cannot.
+    """
+    player = player_at(index)
+    if player is None:
+        return None
+    running = not bool(player.par.play.eval())
+    startup.set_par(player, "play", running)
+    return running
+
+
+def live_index():
+    """Which player the cross is settling on, as an index. 0 if unknowable.
+
+    The number `_step` derives `incoming` from, exposed because the
+    controller's lamps want it: a light per deck saying which one is on screen
+    is the fact a two-deck surface is missing otherwise. Derived from the fade
+    state like everything else about the fade, so there is nothing to keep in
+    step.
+    """
+    container = _container()
+    if container is None:
+        return 0
+    state = _fade_state(container)
+    if state is None:
+        return 0
+    return fade_target(state)
+
+
+def is_live(index):
+    """Whether that player is the one the cross is settling on."""
+    return live_index() == index
+
+
+def next_into(index):
+    """Load the next clip of the deck into that player and cross to it.
+
+    The per-deck Next. Pressing it for the player that is already live cuts
+    that clip out from under itself rather than blending, which is the honest
+    consequence of naming a destination instead of asking for a crossfade -
+    see `_step`.
+    """
+    return _step(1, into=index)
+
+
 #: How close the fade's two ends must be to count as settled. A blend is drawn
 #: in 8 bits per channel, so a difference below this cannot be seen anyway.
 FADE_SETTLED = 1.0 / 255
@@ -452,8 +536,17 @@ def now_playing():
     return current_index(paths, str(player.par.file.val)), len(paths)
 
 
-def _step(step):
+def _step(step, into=None):
     """Move `step` places through the deck and cross to what is there.
+
+    `into` names which player receives the clip. The default - the hidden one -
+    is the crossfade, and it is what every automatic trigger and every panel
+    button asks for. Naming a player instead is what the controller's per-deck
+    Next buttons do, and asking for the player that is **already live** is a
+    legitimate thing to want: the clip is replaced under itself and the fade
+    has nowhere to travel, so it is a hard cut rather than a blend. That falls
+    out of `_begin_fade` writing a target equal to the settled value, which
+    needs no branch here.
 
     Both transport directions in one function, because next and previous
     differ by a sign and nothing else. Where the current position is kept is
@@ -488,7 +581,13 @@ def _step(step):
         return None
 
     live = fade_target(state)
-    incoming = 1 - live
+    incoming = (1 - live) if into is None else int(into)
+    if not 0 <= incoming < len(players):
+        startup.report(
+            f"[{startup.PACKAGE}] no player {into!r}"
+            f" - there are {len(players)}"
+        )
+        return None
 
     order = play_order(len(paths))
     # .val rather than .eval(): the literal string the build wrote, which is
@@ -536,10 +635,16 @@ def fade_seconds(dwell, fade):
     mirrors one value; this is two of them multiplied, and the answer only has
     to be right at the instant a fade begins.
 
-    A dwell of 0 therefore gives a fade of 0, and the cut is hard - including a
-    next press and an end-of-file advance. That follows from what the parameter
-    says it is rather than being a case anybody chose, and it leaves the bottom
-    of the dwell slider meaning one thing: nothing automatic, nothing smoothed.
+    **A hard cut is now `Fade` at 0 and nothing else.** It used to also fall
+    out of a dwell of 0, since 0 was the bottom of that range and the timer
+    switched off - so turning the cycle off silently turned blending off with
+    it, on a next press as much as on an automatic advance. Splitting the
+    switch from the duration on 2026-09-13 ended that: the dwell's bottom is
+    one frame, a fade of a fraction of one frame is a hard cut in practice
+    anyway, and with the cycle switched off a next press now crossfades over
+    whatever the dwell says rather than jumping. That is a behaviour change,
+    and it is the better one - the fade length was never really about whether
+    the timer was running.
 
     Negative inputs answer 0 rather than a negative length. `Dwell` and `Fade`
     are both clamped at the bottom on the settings COMP, so this is the belt to
@@ -568,6 +673,15 @@ def _begin_fade(container, state, incoming):
     )
     startup.set_par(state, "const0value", _cross_value(container, incoming))
     startup.set_par(state, "const1value", float(incoming))
+
+    # The one place the fade's target changes, so the one place the lamps that
+    # report which deck is live have to be asked to look again. Nothing watches
+    # a Constant CHOP's parameters the way the Parameter Execute DATs watch
+    # `play` and `file`, and the file watcher fires a line *above* this one -
+    # early enough to read the target that is being replaced.
+    from . import midi
+
+    midi.refresh_lights()
 
     if seconds <= 0:
         on_fade_done()
@@ -817,26 +931,35 @@ def on_dwell(cycle):
     player, _ = _ops()
     if player is None:
         return None
-    if not dwell_should_run(settings.value(settings.DWELL), player.par.play.eval()):
+    if not dwell_should_run(
+        settings.value(settings.DWELL_ON), player.par.play.eval()
+    ):
         return None
     return next_clip()
 
 
-def dwell_should_run(dwell, clip_playing):
+def dwell_should_run(dwell_on, clip_playing):
     """Whether the dwell timer should be counting. Both inputs have to be true.
 
-    **A dwell of 0 is the timer off, not a cut every frame**, which makes the
-    bottom of the slider a real mode rather than an accident. And **a paused
-    clip is not counted down**: pause means hold this frame, and a player that
-    cut away from a held frame after the dwell expired would make pause mean
-    something narrower than it reads.
+    **The switch is its own parameter now.** Until 2026-09-13 this read the
+    dwell itself and treated 0 as off, so one fader carried a rate at one end
+    and a mode at the other - and the mode sat next to the fastest cutting,
+    where nudging the control off the bottom went from never cutting to cutting
+    thirty times a second. `Dwellon` answers whether, `Dwell` answers how long,
+    and the fader is a duration all the way down.
 
-    Both of those are *interpretations* of a parameter rather than views of one,
-    which is why neither can be a binding: a binding mirrors a value and has no
-    opinion about what it means. This function is where the opinions are, and it
-    is separate from the operator it drives so it can be read on its own.
+    **A paused clip is not counted down**: pause means hold this frame, and a
+    player that cut away from a held frame after the dwell expired would make
+    pause mean something narrower than it reads. Note this is the *machine*
+    being paused - a single deck held with `toggle_at` does not stop the clock,
+    because the other deck is still playing and the cut is still due.
+
+    Both inputs are *interpretations* rather than views of a value, which is
+    why neither can be a binding: a binding mirrors a number and has no opinion
+    about what it means. This function is where the opinions are, and it is
+    separate from the operator it drives so it can be read on its own.
     """
-    return bool(dwell > 0 and clip_playing)
+    return bool(dwell_on and clip_playing)
 
 
 def refresh_dwell():
@@ -867,7 +990,9 @@ def refresh_dwell():
         return None
 
     dwell = settings.value(settings.DWELL)
-    running = dwell_should_run(dwell, player.par.play.eval())
+    running = dwell_should_run(
+        settings.value(settings.DWELL_ON), player.par.play.eval()
+    )
     was_running = bool(timer.par.play.eval())
 
     startup.set_par(timer, "play", running)
@@ -901,6 +1026,16 @@ def _redraw():
 #: the callback DAT dispatches on `panelValue.owner.name` - so adding a button
 #: in `build.py` and adding a function here is the whole of adding a control,
 #: with no third place listing them both.
+#:
+#: **Not every command has a button.** `toggle` never did - the panel keeps
+#: play and pause as two momentary buttons, since two buttons that each do one
+#: thing cannot lie about the state - and the per-deck four below have none
+#: either. They exist for the controller, which has a pair of buttons per
+#: channel strip and no room for a machine-wide transport as well.
+#:
+#: Written out as four entries rather than generated in a loop over the two
+#: players: a table whose keys are computed is a table that cannot be grepped,
+#: and these keys are what `tdpy.midi.MAP` refers to.
 COMMANDS = {
     "play": play,
     "pause": pause,
@@ -908,6 +1043,10 @@ COMMANDS = {
     "previous": previous_clip,
     "next": next_clip,
     "shuffle": shuffle,
+    "toggle_a": lambda: toggle_at(0),
+    "toggle_b": lambda: toggle_at(1),
+    "next_a": lambda: next_into(0),
+    "next_b": lambda: next_into(1),
 }
 
 

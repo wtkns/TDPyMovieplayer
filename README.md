@@ -10,8 +10,8 @@ the other already has the next clip open and decoded, and has had it for the
 whole of the current clip's dwell. That preload is what makes a cut clean, and
 the fade is measured as a **fraction of the dwell** rather than as a duration of
 its own - so a fade of 0.2 is a fifth of the hold however long the hold is. A
-fade of 0 is a hard cut, and a dwell of 0 switches the cycle off entirely and
-takes the fade with it.
+fade of 0 is a hard cut. Whether the cycle runs at all is its own control,
+`auto cut`, rather than the bottom of the dwell's range.
 
 `TDPyMovieplayer.toe` holds no project code. It carries one Execute DAT that reads its
 source from `DAT/StartupExec.py`, puts this folder on `sys.path`, and hands off
@@ -113,6 +113,90 @@ what you see.
 Nothing stores a gain. Each Math CHOP's `gain` is a parameter expression over
 the two settings and the fade, so a MIDI CC, the panel slider and a typed field
 are three writers to one parameter with nothing synchronising them.
+
+## Controller
+
+A Launch Control XL, on MIDI channel 9. Two channel strips, one per player:
+
+| | Column 1 → player A | Column 2 → player B |
+| --- | --- | --- |
+| knob 1 | CC 14 — level A | CC 15 — level B |
+| knob 2 | CC 30 — pan A | CC 31 — pan B |
+| knob 3 | CC 50 — speed A | CC 51 — speed B |
+| fader | CC 78 — dwell | CC 79 — fade |
+| button 1 | note 42 — pause A | note 43 — pause B |
+| button 2 | note 74 — next into A | note 75 — next into B |
+
+The two faders are the exception to the per-deck reading: dwell and fade belong
+to the cycle rather than to either player, and they sit one per column because
+that is where the faders are.
+
+**Speed runs −2 to +4, which is asymmetric on purpose.** 1 is the midpoint of
+that range and therefore sits at the centre of a knob's travel; a symmetric
+−2 to +2 would put 0 — a frozen frame — under the detent. Negative values play
+the movie backwards, which the Movie File In TOP's help documents and which
+works only in Sequential play mode, the mode the build sets.
+
+**The dwell fader is tapered, the rest sweep evenly.** Dwell runs from 1/30 s
+to 60 s and the interesting end is the bottom — the difference between a
+half-second hold and a two-second hold is the difference between a strobe and a
+rhythm, while 35 seconds and 40 seconds look the same. Swept evenly, a 128-step
+fader spends two steps on the first second and forty on the last twenty. The
+fader position is raised to a power before it is mapped onto the range, which
+is a log taper by its usual name:
+
+| CC | 0 | 16 | 32 | 48 | 64 | 80 | 96 | 112 | 127 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| even | 0.03 | 7.6 | 15.1 | 22.7 | 30.2 | 37.8 | 45.4 | 52.9 | 60 |
+| cubed | 0.03 | 0.15 | 0.99 | 3.3 | 7.7 | 15.0 | 25.9 | 41.2 | 60 |
+
+About a third of the fader covers the first second; 20–40 s gets a sixth.
+
+**The floor is one frame.** Every clip in `media/` measures at exactly 30 fps,
+so 1/30 s is the shortest hold that can put a different picture on screen and
+there is nothing below it worth reaching. A power curve rather than an actual
+logarithm is a habit from when the bottom was 0 — with a floor this could now
+be a true log, and the exponent below is the knob that would decide it.
+
+**The exponent is itself a setting**, `dwell curve` on the `Tuning` page,
+defaulting to 3. 1 is exactly the even sweep, so the whole family of curves is
+one float and a knob can be put on it later without touching the map. It draws
+no panel slider — it shapes another control rather than the player, so it lives
+in the typed fields where it is set once and left.
+
+**Only the MIDI fader is tapered.** The panel slider is *bound* to the
+parameter, and a binding carries a value with no transform; the Slider COMP has
+no taper of its own, which was checked against the type stub and the help. The
+parameter therefore stays in seconds, the typed field still takes `5` and means
+five seconds, and the curve belongs to the one control that computes what a
+position means.
+
+**Whether the cycle runs is its own control**, the `auto cut` toggle, not the
+bottom of the dwell's range. Until 2026-09-13 a dwell of 0 meant the timer off,
+which put a mode at the bottom of a rate control — nudging the fader off its
+stop went from never cutting to cutting thirty times a second, and switching
+the cycle off silently switched crossfading off with it. A duration answers how
+long and a toggle answers whether, the same way `play` is separate from
+`speed`. It has no MIDI row yet.
+
+**A pause button holds its own deck only.** On the deck you can see, that
+freezes the picture and its sound. On the hidden one it holds that clip still
+until the next cut, where `_step` sets it playing again — the incoming clip has
+just been cued and a cut landing on a frozen frame would be a cut to nothing.
+
+**A next button loads the following clip into that specific player.** Pressing
+it for the deck that is already live cuts that clip out from under itself
+rather than blending, because a fade to where the cross already is has nowhere
+to travel.
+
+The lamps are views, not state: each pause button lights while its own deck is
+running, and each next button lights on the deck the cross is settling on.
+Nothing remembers what was last sent — the controller may have been unplugged
+or switched template, so every refresh writes all four.
+
+**The map was read off the device, never off a chart.** The XL has eight
+factory and eight user templates sending different numbers on each. To extend
+it, move the control and run `tdpy.midi.learned()` in the textport.
 
 ## Tests
 

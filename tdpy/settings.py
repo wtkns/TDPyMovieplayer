@@ -47,18 +47,33 @@ from . import build, startup
 #: the settings row shares its width between however many sliders there are,
 #: so putting the mixer's four on the same row as the cycle's three would have
 #: taken every slider down to about a third of its width.
+#:
+#: `curve` names **another setting** holding the exponent that shapes how a
+#: MIDI control sweeps this one, or None for a control that sweeps evenly. It
+#: is a name rather than a number for the reason everything here is: an
+#: exponent somebody wants to change is a value with writers, and a value with
+#: writers is a parameter. See `midi.target_value`.
 Setting = collections.namedtuple(
-    "Setting", "name node label kind default minimum maximum bounded page"
+    "Setting", "name node label kind default minimum maximum bounded page curve"
 )
 
-#: The custom pages the parameters go on, and the order their rows are drawn
-#: in. Named for what each configures rather than "Settings", since the COMP is
-#: already called that.
+#: The custom pages the parameters go on. Named for what each configures rather
+#: than "Settings", since the COMP is already called that.
 PAGE_PLAYER = "Player"
 PAGE_AUDIO = "Audio"
-PAGES = (PAGE_PLAYER, PAGE_AUDIO)
+PAGE_TUNING = "Tuning"
+PAGES = (PAGE_PLAYER, PAGE_AUDIO, PAGE_TUNING)
 
-#: The five settings, in the order they are drawn.
+#: The pages the panel draws a row of big sliders for, in the order they stack.
+#:
+#: **Not every page is a row.** `Tuning` holds settings that shape how another
+#: control behaves rather than what the player does - they are set once and
+#: then left, so they belong in the Parameter COMP's typed fields, which show
+#: every custom page, and not in a band of performance sliders where they would
+#: take width from the controls that are actually being played.
+PANEL_PAGES = (PAGE_PLAYER, PAGE_AUDIO)
+
+#: Every setting, in the order each page draws them.
 #:
 #: **Every stochastic or automatic behaviour is off at launch.** The clips play
 #: in the playlist's order, each from its start, at speed 1, held for as long as
@@ -66,8 +81,12 @@ PAGES = (PAGE_PLAYER, PAGE_AUDIO)
 #: deliberately. That is the same choice `player.SEED = None` makes for the
 #: deck: a launch is plain, and the interesting behaviour is asked for.
 #:
-#: A dwell of 0 is not a very fast cut - it is the timer switched off, which is
-#: what makes the bottom of the slider a real mode rather than an accident.
+#: **The dwell is a duration and nothing else.** It used to read 0 as the timer
+#: switched off, which put a mode at the bottom of a rate control - so the
+#: fastest cutting and no cutting at all were neighbouring positions on one
+#: fader. `Dwellon` is the switch now and the dwell's range is 1/30s to a
+#: minute, one frame of 30fps media being the shortest hold that can put a
+#: different picture on screen.
 #:
 #: **Fade is a fraction of the dwell rather than a duration of its own**, which
 #: is the same choice the cue point makes and for the same reason: it stays
@@ -76,10 +95,10 @@ PAGES = (PAGE_PLAYER, PAGE_AUDIO)
 #: silently turn a gentle blend into most of the clip. 0 is a hard cut and 1 is
 #: a player that is always mid-fade.
 #:
-#: The consequence worth knowing is at the bottom of the dwell: with Dwell at 0
-#: the fade is 0 seconds too, so every cut is hard - including a next press and
-#: an end-of-file advance. That follows from what the parameter says it is, and
-#: it keeps the bottom of the dwell slider one clear mode rather than two.
+#: So a hard cut is a fade of 0, and only that. Until the switch was split out
+#: it was also what a dwell of 0 gave, which meant switching the cycle off
+#: switched blending off with it - see `player.fade_seconds`.
+#:
 #: The mixer's four are all bounded, and both bounds mean something. A level of
 #: 1 is full signal by the Audio Movie CHOP's own definition of `volume`, and
 #: there is nothing above it to ask for that is not clipping; a pan runs from
@@ -92,19 +111,43 @@ PAGES = (PAGE_PLAYER, PAGE_AUDIO)
 SETTINGS = (
     Setting(
         "Advanceonend", "advanceonend", "advance at end", "toggle", True,
-        None, None, False, PAGE_PLAYER,
+        None, None, False, PAGE_PLAYER, None,
     ),
     Setting(
         "Randomcue", "randomcue", "random cue", "toggle", False,
-        None, None, False, PAGE_PLAYER,
+        None, None, False, PAGE_PLAYER, None,
     ),
-    Setting("Dwell", "dwell", "dwell", "float", 0.0, 0.0, 60.0, False, PAGE_PLAYER),
-    Setting("Fade", "fade", "fade", "float", 0.0, 0.0, 1.0, True, PAGE_PLAYER),
-    Setting("Speed", "speed", "speed", "float", 1.0, 0.0, 4.0, False, PAGE_PLAYER),
-    Setting("Levela", "levela", "level A", "float", 1.0, 0.0, 1.0, True, PAGE_AUDIO),
-    Setting("Pana", "pana", "pan A", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO),
-    Setting("Levelb", "levelb", "level B", "float", 1.0, 0.0, 1.0, True, PAGE_AUDIO),
-    Setting("Panb", "panb", "pan B", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO),
+    Setting(
+        "Dwellon", "dwellon", "auto cut", "toggle", False,
+        None, None, False, PAGE_PLAYER, None,
+    ),
+    Setting(
+        "Dwell", "dwell", "dwell", "float", 4.0, 1.0 / 30.0, 60.0, True,
+        PAGE_PLAYER, "Dwellcurve",
+    ),
+    Setting("Fade", "fade", "fade", "float", 0.0, 0.0, 1.0, True, PAGE_PLAYER, None),
+    Setting(
+        "Speeda", "speeda", "speed A", "float", 1.0, -2.0, 4.0, False,
+        PAGE_PLAYER, None,
+    ),
+    Setting(
+        "Speedb", "speedb", "speed B", "float", 1.0, -2.0, 4.0, False,
+        PAGE_PLAYER, None,
+    ),
+    Setting(
+        "Levela", "levela", "level A", "float", 1.0, 0.0, 1.0, True,
+        PAGE_AUDIO, None,
+    ),
+    Setting("Pana", "pana", "pan A", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO, None),
+    Setting(
+        "Levelb", "levelb", "level B", "float", 1.0, 0.0, 1.0, True,
+        PAGE_AUDIO, None,
+    ),
+    Setting("Panb", "panb", "pan B", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO, None),
+    Setting(
+        "Dwellcurve", "dwellcurve", "dwell curve", "float", 3.0, 1.0, 4.0, True,
+        PAGE_TUNING, None,
+    ),
 )
 
 #: Names the rest of the project refers to, so a rename here is caught by the
@@ -113,16 +156,60 @@ ADVANCE_ON_END = "Advanceonend"
 RANDOM_CUE = "Randomcue"
 DWELL = "Dwell"
 FADE = "Fade"
-SPEED = "Speed"
+
+#: Whether the dwell timer counts at all.
+#:
+#: **A duration is not a switch.** Until 2026-09-13 a dwell of 0 meant the
+#: timer off, so one parameter answered both "how long between cuts" and
+#: "should there be cuts", and the two ends of one fader were a rate and a
+#: mode. Splitting them is the same move the transport already makes in keeping
+#: `play` separate from `speed`, and it is what let the dwell's bottom become a
+#: real duration - one frame of 30fps media - instead of a place the timer
+#: switches off.
+#:
+#: Off at launch, like every other automatic behaviour here.
+DWELL_ON = "Dwellon"
+SPEED_A = "Speeda"
+SPEED_B = "Speedb"
 LEVEL_A = "Levela"
 PAN_A = "Pana"
 LEVEL_B = "Levelb"
 PAN_B = "Panb"
 
+#: The exponent shaping how a MIDI control sweeps the dwell, and the one
+#: setting that is about another setting rather than about the player.
+#:
+#: **Why the dwell needed one and nothing else does.** Dwell runs 0 to 60 and
+#: the interesting end is the bottom: the difference between a half-second hold
+#: and a two-second hold is the difference between a strobe and a rhythm, while
+#: the difference between 35 and 40 seconds is nothing anybody can see. Swept
+#: evenly, a 128-step fader spends two steps on the first second and forty on
+#: the last twenty. Cubed, it spends about thirty on the first second.
+#:
+#: **An exponent rather than a menu of named curves.** 1 is exactly linear, 2
+#: is gentle, 3 is the default, and everything between is reachable - so this
+#: is the whole family of power curves in one float, which needs no new setting
+#: kind and no list of formulas to keep in step with the code that applies
+#: them. A knob on it sweeps the response of another knob.
+DWELL_CURVE = "Dwellcurve"
+
 #: The mixer's settings in `build.PLAYER_TOPS` order, as (level, pan) pairs.
 #: One place says which strip belongs to which player, so `build._add_audio`
 #: iterates rather than spelling four names out again in a different order.
 STRIPS = ((LEVEL_A, PAN_A), (LEVEL_B, PAN_B))
+
+#: Each player's speed, in the same order. Speed was one setting bound to both
+#: players until 2026-09-13, on the argument that one master with two views
+#: costs nothing - which was true, and the reason splitting it costs nothing
+#: either: the binding does the same work twice instead of once.
+#:
+#: **The range is asymmetric on purpose.** -2 to 4 is what puts 1 - normal
+#: speed - exactly at the middle of the range, and therefore at the centre of a
+#: MIDI knob's travel. A symmetric -2 to 2 would put 0 there, which is a frozen
+#: frame at the detent. The Movie File In TOP's help says negative values play
+#: the movie backwards, and that this works only in Sequential play mode, which
+#: is the mode `build.PLAY_MODE` sets.
+SPEEDS = (SPEED_A, SPEED_B)
 
 
 def spec(name):

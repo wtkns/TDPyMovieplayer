@@ -158,7 +158,7 @@ class TestSliderWidth:
         # panel that no longer exists.
         from tdpy import settings
 
-        for page in settings.PAGES:
+        for page in settings.PANEL_PAGES:
             used = (
                 len(settings.toggles(page)) * build.SETTINGS_TOGGLE_WIDTH
                 + len(settings.sliders(page)) * build._slider_width(page)
@@ -190,6 +190,35 @@ class TestSliderWidth:
 
         monkeypatch.setattr(build, "SETTINGS_TOGGLE_WIDTH", 10_000)
         assert build._slider_width(settings.PAGE_PLAYER) == 0
+
+
+class TestSettingsRows:
+    def test_every_drawn_page_has_a_row_to_draw_it_in(self):
+        # PANEL_PAGES decides which pages become bands; this table says what
+        # each band is made of. A page in one and not the other is a row that
+        # never appears, which on a panel of six bands is not obvious.
+        from tdpy import settings
+
+        rows = build._settings_rows(settings)
+        for page in settings.PANEL_PAGES:
+            assert page in rows, page
+
+    def test_a_page_with_no_row_is_not_drawn_at_all(self):
+        # Tuning holds settings that shape other settings. They belong in the
+        # Parameter COMP, which shows every custom page, and not in a band of
+        # performance sliders where they would take width from the controls
+        # being played.
+        from tdpy import settings
+
+        assert settings.PAGE_TUNING in settings.PAGES
+        assert settings.PAGE_TUNING not in settings.PANEL_PAGES
+        assert settings.PAGE_TUNING not in build._settings_rows(settings)
+
+    def test_every_row_names_a_place_in_the_stack(self):
+        from tdpy import settings
+
+        for _, row, _ in build._settings_rows(settings).values():
+            assert row in build.PANEL_ROWS, row
 
 
 class TestRowOrder:

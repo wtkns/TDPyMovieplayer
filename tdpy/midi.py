@@ -7,12 +7,17 @@ name in `player.COMMANDS`. So a knob writes the parameter the panel's slider is
 bound to and the slider follows without being told, and a button calls the same
 function the panel's button calls. Nothing here has to keep anything in step.
 
-**The Device Mapper is deliberately not used.** TouchDesigner's usual route is
-the MIDI Device Mapper dialog, whose User Maps live at `/local/midi/userdevices`
-- inside the `.toe`. This project's rule is that nothing may require the `.toe`
-to have been saved, so the map lives here instead, in a file that is version
-controlled and can be read. The cost is that the mapping is written out by hand
-rather than clicked together, which is what `LEARN` below is for.
+**The Device Mapper is used once, to discover, and never to configure.**
+Corrected 2026-09-12: this docstring used to say the dialog was not used at all
+and that its output lived at `/local/midi/userdevices`. What it actually writes
+is a five-column Table DAT at `/local/midi/device`, and a table is something
+`build()` can author on every launch - see `DEVICE_TABLE` below. So the `.toe`
+still carries nothing, and the dialog was needed exactly once, to find out what
+the table is called.
+
+What is genuinely not used is the dialog's *definition* column - the mapping
+from controls to meanings. That lives in `MAP` below, in a file that is version
+controlled and can be diffed, and `LEARN` is how its rows are found.
 
 Nothing in this module imports `td` at module scope, so the map and everything
 derived from it is testable at a normal prompt.
@@ -69,21 +74,32 @@ CHANNEL = 9
 #: taken from a chart would have been a guess that looked exactly like a
 #: measurement.
 #:
-#: All four are the **leftmost channel strip**. Send A (CC 14) is deliberately
-#: absent: the settings it could still drive are the two toggles, and a knob
-#: that has to be swept past halfway to flip a switch is a worse control than
-#: no control. It is written down here so the next person to look does not
-#: rediscover it as a gap.
+#: **Two channel strips now, one per player.** Column 1 drives player A and
+#: column 2 drives player B, top to bottom: level, pan, speed, then the fader,
+#: then the strip's two buttons. The two faders are the exception - `Dwell` and
+#: `Fade` belong to the cycle rather than to either deck, and they are placed
+#: one per column because that is where the faders are, not because column 2
+#: owns the fade.
+#:
 #: Only the Note On is mapped. The device sends Note On 127 then Note Off 0 for
 #: every press, and `is_press` refuses the release - but a Note Off row here
 #: would be a second way to say the same thing, and the one that fires at the
 #: wrong end if `is_press` were ever relaxed.
 MAP = (
+    # Column 1 - player A
+    Control(CONTROL_CHANGE, CHANNEL, 14, "setting", settings.LEVEL_A),
+    Control(CONTROL_CHANGE, CHANNEL, 30, "setting", settings.PAN_A),
+    Control(CONTROL_CHANGE, CHANNEL, 50, "setting", settings.SPEED_A),
     Control(CONTROL_CHANGE, CHANNEL, 78, "setting", settings.DWELL),
-    Control(CONTROL_CHANGE, CHANNEL, 50, "setting", settings.FADE),
-    Control(CONTROL_CHANGE, CHANNEL, 30, "setting", settings.SPEED),
-    Control(NOTE_ON, CHANNEL, 42, "command", "toggle"),
-    Control(NOTE_ON, CHANNEL, 74, "command", "next"),
+    Control(NOTE_ON, CHANNEL, 42, "command", "toggle_a"),
+    Control(NOTE_ON, CHANNEL, 74, "command", "next_a"),
+    # Column 2 - player B
+    Control(CONTROL_CHANGE, CHANNEL, 15, "setting", settings.LEVEL_B),
+    Control(CONTROL_CHANGE, CHANNEL, 31, "setting", settings.PAN_B),
+    Control(CONTROL_CHANGE, CHANNEL, 51, "setting", settings.SPEED_B),
+    Control(CONTROL_CHANGE, CHANNEL, 79, "setting", settings.FADE),
+    Control(NOTE_ON, CHANNEL, 43, "command", "toggle_b"),
+    Control(NOTE_ON, CHANNEL, 75, "command", "next_b"),
 )
 
 #: The highest value a MIDI byte carries. Everything scaled out of a CC comes
@@ -191,23 +207,37 @@ LIGHT_OFF = 0
 #: light on a button that sends nothing would be a lamp nobody can reach - and
 #: a test holds the two tables to that rather than merging them, since a
 #: button that sends without lighting is perfectly reasonable.
+#:
+#: **A lamp under the button it describes.** Each pause button lights while its
+#: own deck is running, and each next button lights on the deck the cross is
+#: settling on - so the surface answers the two questions a two-deck controller
+#: otherwise cannot: is this deck moving, and is it the one on screen.
+#:
+#: The `fading` state that note 74 used to show is gone from the lamps, and
+#: nothing is lost: a fade is exactly the interval when neither `live` light
+#: is the whole truth, and watching the pair change is a better reading of it
+#: than one light that says a fade is happening somewhere.
 LIGHTS = (
-    Light(42, "playing"),
-    Light(74, "fading"),
+    Light(42, "playing_a"),
+    Light(43, "playing_b"),
+    Light(74, "live_a"),
+    Light(75, "live_b"),
 )
 
 
 def light_states():
     """What each named state currently is, as a dict of name to bool.
 
-    The one place the lamps ask the machine anything. Both answers are read
-    rather than remembered - `player.playing()` is the transport parameter and
-    `player.is_fading()` is the fade's two ends disagreeing - so a light cannot
-    drift from what it reports, and a rebuild needs nothing restored.
+    The one place the lamps ask the machine anything. Every answer is read
+    rather than remembered - `player.playing_at` is that deck's transport
+    parameter and `player.is_live` is the fade state's target - so a light
+    cannot drift from what it reports, and a rebuild needs nothing restored.
     """
     return {
-        "playing": player.playing(),
-        "fading": player.is_fading(),
+        "playing_a": player.playing_at(0),
+        "playing_b": player.playing_at(1),
+        "live_a": player.is_live(0),
+        "live_b": player.is_live(1),
     }
 
 
@@ -357,7 +387,7 @@ def is_press(message, value):
     return value > 0
 
 
-def target_value(setting, value, current=None):
+def target_value(setting, value, current=None, exponent=1.0):
     """What a MIDI value means for that setting.
 
     A float setting is the CC scaled across the range the setting declares, so
@@ -368,11 +398,32 @@ def target_value(setting, value, current=None):
     idea what the parameter currently holds. Given `current`, a press returns
     its opposite; given nothing, it returns True, which is the best a caller
     who could not read the parameter can do.
+
+    **`exponent` shapes where the control's travel goes**, by raising the
+    fraction of the way along before it is mapped onto the range. 1 spreads the
+    range evenly; above 1 crowds it at the bottom, which is a log taper by its
+    usual name - the value is spaced logarithmically even though the arithmetic
+    here is a power. A power rather than an actual logarithm because
+    `log(0)` is undefined and 0 is a real position on the dwell: it is the
+    timer switched off, and a curve that could not reach it would have taken a
+    mode away to gain a taper.
+
+    Pure, and takes the exponent rather than reading it. The setting that holds
+    it is looked up by `apply_setting`, which is the function here that is
+    allowed to touch the network - the same split the rest of this module is
+    built on.
+
+    Clamped at 0.01 rather than trusted. The parameter holding it is clamped at
+    1, but an exponent of 0 would make every position answer the maximum
+    (`0 ** 0` is 1 in Python), so a control that had somehow reached it would
+    not look broken - it would look like a fader that had stopped moving while
+    reading full.
     """
     if setting.kind == "toggle":
         return True if current is None else not current
     span = setting.maximum - setting.minimum
-    return setting.minimum + (value / FULL) * span
+    position = (value / FULL) ** max(float(exponent), 0.01)
+    return setting.minimum + position * span
 
 
 def on_message(message, channel, index, value):
@@ -433,5 +484,34 @@ def apply_setting(name, message, value):
     if parameter is None:
         return None  # settings.parameter has already said why
 
-    parameter.val = target_value(specification, value, current=parameter.eval())
+    parameter.val = target_value(
+        specification,
+        value,
+        current=parameter.eval(),
+        exponent=curve_exponent(specification),
+    )
     return parameter.eval()
+
+
+def curve_exponent(setting):
+    """The exponent shaping this setting's MIDI response. 1.0 if it has none.
+
+    Reads the *other* setting named by `setting.curve`, which is what makes the
+    taper something a knob can change rather than a constant compiled into this
+    module. `settings.value` already falls back to a spec's default and says so
+    in the log when the parameter cannot be read, so a missing Dwellcurve gives
+    a cubed sweep and a line explaining why, rather than a silent linear one.
+
+    1.0 for a setting with no curve, because raising a fraction to the first
+    power is exactly the even sweep every other control wants - so there is no
+    branch downstream and no second code path to keep correct.
+    """
+    if setting.curve is None:
+        return 1.0
+    exponent = settings.value(setting.curve)
+    if exponent is None:
+        # settings.value has already reported the unknown name. 1.0 is the
+        # honest fallback: an even sweep is wrong but usable, and the log says
+        # which setting was not found.
+        return 1.0
+    return exponent

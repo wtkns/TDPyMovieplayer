@@ -539,9 +539,16 @@ SETTINGS_TOGGLE_TYPE = "toggledown"
 #: `sliderv` and `slideruv`; all three are named in the Slider COMP's help.
 SETTINGS_SLIDER_TYPE = "slideru"
 
-#: The toggles take a transport button's width, so the row lines up with the
-#: one above it; the sliders divide whatever is left.
-SETTINGS_TOGGLE_WIDTH = BUTTON_WIDTH
+#: The toggles' width; the sliders divide whatever is left of the row.
+#:
+#: This was `BUTTON_WIDTH`, so a row of toggles lined up with the transport
+#: above it. That alignment stopped being reachable when the Player row went to
+#: three toggles - at a transport button's width they leave 320px for four
+#: sliders, which is 80px each and not a control anybody can set a dwell with.
+#: Narrower toggles put the sliders back to 125px. A toggle needs less width
+#: than a transport button in any case: it carries a two-word label and a
+#: state, not a target for a hand moving quickly.
+SETTINGS_TOGGLE_WIDTH = 120
 
 #: The parameters mapping a slider's drag onto the setting's range.
 #:
@@ -822,8 +829,9 @@ def onCycleStart(timerOp, segment, cycle):
 #: settings COMP's Dwell, whose name comes from `settings.DWELL` rather than
 #: being spelled again here so a rename is caught by the interpreter.
 #:
-#: **Two inputs, because two things stop the timer.** A dwell of 0 means off
-#: rather than a cut every frame, and a paused clip is not counted down - pause
+#: **Two inputs, because two things stop the timer.** `Dwellon` is the switch -
+#: the dwell itself is a duration and no longer carries a mode at the bottom of
+#: its range - and a paused clip is not counted down - pause
 #: means hold this frame, and cutting away from a held frame would make pause
 #: mean something narrower than it reads. Neither is a binding: both are
 #: interpretations of a parameter rather than views of one, and a binding
@@ -1244,7 +1252,7 @@ def _slider_width(page=None):
     return max(_panel_width() - fixed - gaps, 0) // count
 
 
-def _add_control_panel(parent, container, rows, configuration, td):
+def _add_control_panel(parent, container, clips, configuration, td):
     """The panel: transport, the settings band, and the clip list beneath them.
 
     Destroyed and rebuilt on every build, unlike the window that shows it - so
@@ -1253,7 +1261,7 @@ def _add_control_panel(parent, container, rows, configuration, td):
     the path does not change when the operator at the end of it does.
 
     `container` is the build container, needed only so the Parameter Execute
-    DAT can be pointed at the player TOP inside it; `rows` is the scanned
+    DAT can be pointed at the player TOP inside it; `clips` is the scanned
     playlist, needed only for its length; `configuration` is the settings COMP
     the band's controls bind to.
     """
@@ -1279,22 +1287,32 @@ def _add_control_panel(parent, container, rows, configuration, td):
     from . import settings as settings_module
 
     _add_transport(panel, td)
-    _add_settings_row(
-        panel, configuration, settings_module.PAGE_PLAYER,
-        SETTINGS_ROW_COMP, "settings", SETTINGS_ROW_HEIGHT, td,
-    )
-    _add_settings_row(
-        panel, configuration, settings_module.PAGE_AUDIO,
-        AUDIO_ROW_COMP, "audio", AUDIO_ROW_HEIGHT, td,
-    )
+    # Iterated rather than called twice by hand, so `settings.PANEL_PAGES` is
+    # what decides which pages become bands - a page added there without a row
+    # here is reported below rather than quietly not drawn.
+    # Two collections in one function now, so neither is called `rows`. The
+    # playlist arrived under that name and this dict was assigned over it,
+    # which handed the clip list two panel-row definitions instead of
+    # seventeen clips - and a length taken from the wrong collection is not
+    # wrong in a way anything but the screen can see.
+    bands = _settings_rows(settings_module)
+    for page in settings_module.PANEL_PAGES:
+        band = bands.get(page)
+        if band is None:
+            startup.report(
+                f"[{startup.PACKAGE}] no panel row defined for page {page!r}"
+                f" - have {', '.join(sorted(bands))}"
+            )
+            continue
+        _add_settings_row(panel, configuration, page, *band, td)
     _add_parameters(panel, configuration, td)
-    _add_clip_list(panel, container, rows, td)
+    _add_clip_list(panel, container, clips, td)
     _add_diagnostics(panel, container, td)
 
     startup.report(
         f"[{startup.PACKAGE}] control panel at {panel.path}:"
         f" {', '.join(name for name, _ in CONTROL_BUTTONS)}"
-        f" over {len(rows)} clip(s)"
+        f" over {len(clips)} clip(s)"
     )
     return panel
 
@@ -1404,6 +1422,20 @@ def _add_transport(panel, td):
     startup.set_par(executor, "active", True)
 
     return transport
+
+
+def _settings_rows(settings):
+    """Which operator, `PANEL_ROWS` key and height each drawn page gets.
+
+    A function rather than a module constant because the keys are page names
+    owned by `tdpy.settings`, and this module cannot import it at module scope
+    - `settings` imports `build`, so the dependency only runs one way at import
+    time. Taking the module as an argument keeps the names spelled once.
+    """
+    return {
+        settings.PAGE_PLAYER: (SETTINGS_ROW_COMP, "settings", SETTINGS_ROW_HEIGHT),
+        settings.PAGE_AUDIO: (AUDIO_ROW_COMP, "audio", AUDIO_ROW_HEIGHT),
+    }
 
 
 def _add_settings_row(panel, configuration, page, comp_name, row, height, td):
@@ -1651,15 +1683,16 @@ def _add_player(container, rows, configuration, td):
     needed rather than recorded anywhere - the same move the transport makes in
     reading its position off `file` instead of keeping an index.
 
-    Speed is **bound** to the settings COMP's Speed on both, which is what makes
-    two players cost nothing here: one master, two views, and a MIDI CC at Phase
-    7 still writing one place. Nothing in this project may write `speed` on a
-    player - a binding is two-way, so a stray `set_par` would overwrite the
-    master rather than be overridden by it.
+    Speed is **bound**, each player to its own `Speeda`/`Speedb` setting. It was
+    one master for both until 2026-09-13, on the argument that one value with
+    many views costs nothing; splitting it cost nothing for the same reason, and
+    two decks that can run at different rates is audible now that each has its
+    own mixer strip. Nothing in this project may write `speed` on a player - a
+    binding is two-way, so a stray `set_par` would overwrite the master rather
+    than be overridden by it.
     """
     from . import playlist, settings, startup
 
-    speed = settings.parameter(configuration, settings.SPEED)
     players = []
     for index, name in enumerate(PLAYER_TOPS):
         player = _place(
@@ -1676,6 +1709,11 @@ def _add_player(container, rows, configuration, td):
         startup.set_menu(player, "textendright", PLAYER_EXTEND_RIGHT)
         startup.set_menu(player, "cuepointunit", CUE_POINT_UNIT)
 
+        # Each player binds to its **own** speed, so the two decks can run at
+        # different rates either side of a crossfade. One setting bound to both
+        # was the arrangement until 2026-09-13 and it cost nothing; two costs
+        # nothing either, because the binding does the work in both cases.
+        speed = settings.parameter(configuration, settings.SPEEDS[index])
         if speed is not None:
             startup.bind(player.par.speed, speed)
 
@@ -1990,7 +2028,7 @@ def _add_cycle(container, configuration, td):
 
     # Running from the first frame. Whether it actually *counts* is the Play
     # parameter's business, and the two watchers below own that: the timer is
-    # stopped by a dwell of 0 and by a paused clip, and `player.refresh_dwell`
+    # stopped by the Dwellon switch and by a paused clip, and `refresh_dwell`
     # is the one place those two are turned into an answer.
     pulse(timer, "start")
 
