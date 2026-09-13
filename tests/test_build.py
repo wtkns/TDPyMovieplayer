@@ -114,6 +114,7 @@ class TestPanelHeight:
     ROW_HEIGHTS = (
         "BUTTON_HEIGHT",
         "SETTINGS_ROW_HEIGHT",
+        "AUDIO_ROW_HEIGHT",
         "PARAMETER_HEIGHT",
         "CLIP_LIST_HEIGHT",
         "DIAGNOSTICS_HEIGHT",
@@ -147,28 +148,73 @@ class TestPanelHeight:
 
 
 class TestSliderWidth:
-    def test_the_row_fills_the_panel_exactly(self):
-        # The sliders absorb what the toggles leave, so the row is the panel's
+    def test_every_row_fills_the_panel_exactly(self):
+        # The sliders absorb what the toggles leave, so a row is the panel's
         # width give or take the integer division - a strip of dead panel here
         # is the symptom of getting the gap count wrong.
+        #
+        # Per page, because a page is a row. Measuring every setting at once
+        # would still have balanced, and would have described a single-row
+        # panel that no longer exists.
         from tdpy import settings
 
-        used = (
-            len(settings.toggles()) * build.SETTINGS_TOGGLE_WIDTH
-            + len(settings.sliders()) * build._slider_width()
-            + (len(settings.SETTINGS) - 1) * build.PANEL_SPACING
-        )
-        assert build._panel_width() - used < len(settings.sliders())
+        for page in settings.PAGES:
+            used = (
+                len(settings.toggles(page)) * build.SETTINGS_TOGGLE_WIDTH
+                + len(settings.sliders(page)) * build._slider_width(page)
+                + (len(settings.on_page(page)) - 1) * build.PANEL_SPACING
+            )
+            assert build._panel_width() - used < len(settings.sliders(page)), page
+
+    def test_a_row_of_four_sliders_is_not_measured_against_all_nine(self):
+        # The mixer's row and the cycle's row hold different numbers of
+        # controls, so their sliders are different widths. A `_slider_width`
+        # that ignored its page would hand both rows the same number and one
+        # of the two would not fill the panel - which is exactly what the
+        # single-row version did when the audio settings arrived.
+        from tdpy import settings
+
+        player = build._slider_width(settings.PAGE_PLAYER)
+        audio = build._slider_width(settings.PAGE_AUDIO)
+        assert player != audio
+        assert player > 0 and audio > 0
 
     def test_no_sliders_is_not_a_division_by_zero(self, monkeypatch):
         from tdpy import settings
 
         monkeypatch.setattr(settings, "SETTINGS", settings.toggles())
-        assert build._slider_width() == 0
+        assert build._slider_width(settings.PAGE_PLAYER) == 0
 
     def test_a_row_wider_than_the_panel_is_not_a_negative_width(self, monkeypatch):
+        from tdpy import settings
+
         monkeypatch.setattr(build, "SETTINGS_TOGGLE_WIDTH", 10_000)
-        assert build._slider_width() == 0
+        assert build._slider_width(settings.PAGE_PLAYER) == 0
+
+
+class TestRowOrder:
+    def test_every_named_row_has_a_distinct_place(self):
+        assert len(set(build.PANEL_ROWS)) == len(build.PANEL_ROWS)
+
+    def test_the_panel_stacks_as_many_rows_as_it_names(self):
+        # PANEL_ROWS decides where a row sits and `_panel_height` decides how
+        # tall the panel is. A row named in one and missing from the other is
+        # either a band drawn off the bottom edge or a strip of dead panel, and
+        # neither says which list was not updated.
+        assert len(build.PANEL_ROWS) == len(TestPanelHeight.ROW_HEIGHTS)
+
+    def test_the_mixer_sits_between_the_cycle_and_the_typed_fields(self):
+        assert (
+            build._row_order("settings")
+            < build._row_order("audio")
+            < build._row_order("parameters")
+        )
+
+    def test_an_unknown_row_raises_rather_than_landing_at_the_top(self):
+        # ValueError out of .index(), not a silent 0 - a row that quietly took
+        # the transport's position would look like a layout bug, not a typo.
+        with pytest.raises(ValueError):
+            build._row_order("mixer")
 
 
 class FakeChannel:

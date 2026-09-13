@@ -53,6 +53,10 @@ class TestSpecification:
             settings.DWELL,
             settings.FADE,
             settings.SPEED,
+            settings.LEVEL_A,
+            settings.PAN_A,
+            settings.LEVEL_B,
+            settings.PAN_B,
         }
         assert {item.name for item in settings.SETTINGS} == named
 

@@ -41,13 +41,22 @@ from . import build, startup
 #: Only a setting whose range *means* something is bounded. Fade is a fraction
 #: of the dwell, so 1 is all of it and there is nothing above that to ask for;
 #: speed and dwell have no natural top and their sliders are a convenience.
+#:
+#: `page` is which custom page the parameter goes on, and it is also how the
+#: panel is divided into rows: a page is a band of controls. It exists because
+#: the settings row shares its width between however many sliders there are,
+#: so putting the mixer's four on the same row as the cycle's three would have
+#: taken every slider down to about a third of its width.
 Setting = collections.namedtuple(
-    "Setting", "name node label kind default minimum maximum bounded"
+    "Setting", "name node label kind default minimum maximum bounded page"
 )
 
-#: The custom page the parameters go on. One page, named for what it configures
-#: rather than "Settings", since the COMP is already called that.
-PAGE = "Player"
+#: The custom pages the parameters go on, and the order their rows are drawn
+#: in. Named for what each configures rather than "Settings", since the COMP is
+#: already called that.
+PAGE_PLAYER = "Player"
+PAGE_AUDIO = "Audio"
+PAGES = (PAGE_PLAYER, PAGE_AUDIO)
 
 #: The five settings, in the order they are drawn.
 #:
@@ -71,18 +80,31 @@ PAGE = "Player"
 #: the fade is 0 seconds too, so every cut is hard - including a next press and
 #: an end-of-file advance. That follows from what the parameter says it is, and
 #: it keeps the bottom of the dwell slider one clear mode rather than two.
+#: The mixer's four are all bounded, and both bounds mean something. A level of
+#: 1 is full signal by the Audio Movie CHOP's own definition of `volume`, and
+#: there is nothing above it to ask for that is not clipping; a pan runs from
+#: hard left to hard right and 0.5 is the middle. Neither has the open top that
+#: speed and dwell have, so neither is a slider whose end is a convenience.
+#:
+#: The levels default to 1 and the pans to centre - a plain launch, in the same
+#: sense the cycle's defaults are plain: both clips full and centred, and the
+#: placing is something asked for rather than arrived at.
 SETTINGS = (
     Setting(
         "Advanceonend", "advanceonend", "advance at end", "toggle", True,
-        None, None, False,
+        None, None, False, PAGE_PLAYER,
     ),
     Setting(
         "Randomcue", "randomcue", "random cue", "toggle", False,
-        None, None, False,
+        None, None, False, PAGE_PLAYER,
     ),
-    Setting("Dwell", "dwell", "dwell", "float", 0.0, 0.0, 60.0, False),
-    Setting("Fade", "fade", "fade", "float", 0.0, 0.0, 1.0, True),
-    Setting("Speed", "speed", "speed", "float", 1.0, 0.0, 4.0, False),
+    Setting("Dwell", "dwell", "dwell", "float", 0.0, 0.0, 60.0, False, PAGE_PLAYER),
+    Setting("Fade", "fade", "fade", "float", 0.0, 0.0, 1.0, True, PAGE_PLAYER),
+    Setting("Speed", "speed", "speed", "float", 1.0, 0.0, 4.0, False, PAGE_PLAYER),
+    Setting("Levela", "levela", "level A", "float", 1.0, 0.0, 1.0, True, PAGE_AUDIO),
+    Setting("Pana", "pana", "pan A", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO),
+    Setting("Levelb", "levelb", "level B", "float", 1.0, 0.0, 1.0, True, PAGE_AUDIO),
+    Setting("Panb", "panb", "pan B", "float", 0.5, 0.0, 1.0, True, PAGE_AUDIO),
 )
 
 #: Names the rest of the project refers to, so a rename here is caught by the
@@ -92,6 +114,15 @@ RANDOM_CUE = "Randomcue"
 DWELL = "Dwell"
 FADE = "Fade"
 SPEED = "Speed"
+LEVEL_A = "Levela"
+PAN_A = "Pana"
+LEVEL_B = "Levelb"
+PAN_B = "Panb"
+
+#: The mixer's settings in `build.PLAYER_TOPS` order, as (level, pan) pairs.
+#: One place says which strip belongs to which player, so `build._add_audio`
+#: iterates rather than spelling four names out again in a different order.
+STRIPS = ((LEVEL_A, PAN_A), (LEVEL_B, PAN_B))
 
 
 def spec(name):
@@ -106,14 +137,27 @@ def spec(name):
     return None
 
 
-def toggles():
+def on_page(page=None):
+    """Every setting on that page, in order. All of them when page is None.
+
+    The panel draws one row per page, so this is what a row is. `None` rather
+    than a default page, because a caller asking about the whole specification
+    - the Parameter COMP, and the tests that check the named constants cover it
+    - is asking a different question from one drawing a row.
+    """
+    if page is None:
+        return SETTINGS
+    return tuple(item for item in SETTINGS if item.page == page)
+
+
+def toggles(page=None):
     """The settings drawn as buttons."""
-    return tuple(item for item in SETTINGS if item.kind == "toggle")
+    return tuple(item for item in on_page(page) if item.kind == "toggle")
 
 
-def sliders():
+def sliders(page=None):
     """The settings drawn as sliders - the ones with a range to slide over."""
-    return tuple(item for item in SETTINGS if item.kind == "float")
+    return tuple(item for item in on_page(page) if item.kind == "float")
 
 
 def attributes(setting):
@@ -164,7 +208,7 @@ def ensure(parent, td):
     for setting in SETTINGS:
         parameter, created = startup.custom_par(
             comp,
-            PAGE,
+            setting.page,
             setting.kind,
             setting.name,
             label=setting.label,

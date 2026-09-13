@@ -142,12 +142,98 @@ FADE_FRACTION_CHANNEL = "timer_fraction"
 #: Relative paths, because all three operators are siblings inside the build
 #: container - which also means the expression survives the container being
 #: created somewhere other than /project1.
-CROSS_EXPR = (
-    f"op('{FADE_STATE_CHOP}')['{FADE_START_CHANNEL}']"
-    f" + (op('{FADE_STATE_CHOP}')['{FADE_TARGET_CHANNEL}']"
-    f" - op('{FADE_STATE_CHOP}')['{FADE_START_CHANNEL}'])"
-    f" * op('{FADE_TIMER_CHOP}')['{FADE_FRACTION_CHANNEL}']"
+#:
+#: A template rather than a finished string, because the audio mixer needs the
+#: **same arithmetic** from a node one level deeper, where a bare `fadeState`
+#: resolves to nothing. `{prefix}` is empty for the Cross TOP's own sibling
+#: reference and the mixer's containing path for the gains. Generating both
+#: from one template is the point: two spellings of where the fade has got to
+#: could disagree, and the symptom would be sound that leads or lags the
+#: picture by an amount nobody wrote down.
+CROSS_EXPR_TEMPLATE = (
+    "op('{prefix}" + FADE_STATE_CHOP + "')['" + FADE_START_CHANNEL + "']"
+    " + (op('{prefix}" + FADE_STATE_CHOP + "')['" + FADE_TARGET_CHANNEL + "']"
+    " - op('{prefix}" + FADE_STATE_CHOP + "')['" + FADE_START_CHANNEL + "'])"
+    " * op('{prefix}" + FADE_TIMER_CHOP + "')['" + FADE_FRACTION_CHANNEL + "']"
 )
+
+CROSS_EXPR = CROSS_EXPR_TEMPLATE.format(prefix="")
+
+#: The mixer, and the base COMP it all lives in.
+#:
+#: A COMP of its own inside the build container, rather than fourteen more
+#: operators loose beside the players. It is a baseCOMP and not a containerCOMP
+#: because nothing in it is a panel widget - the rule that a widget must live
+#: in a panel-type COMP is about widgets, and these are CHOPs.
+#:
+#: It buys one thing beyond tidiness: the whole mixer is one node to bypass,
+#: one node to look inside, and one node whose absence says the audio was never
+#: built. It costs the gain expressions their relative paths, which is why they
+#: are baked absolute at build time - see `tdpy.audio.parameter_expression`.
+AUDIO_COMP = "audio"
+
+#: One strip per player, in `PLAYER_TOPS` order. Each name below is suffixed
+#: with the strip's letter, so the operators read `audioA`, `leftA`, `nameLA`
+#: and so on - which is the same A/B the players and the Cross TOP use, and
+#: the reason the suffix is taken from `PLAYER_TOPS` rather than written twice.
+AUDIO_STRIP_SUFFIXES = tuple(name[-1] for name in PLAYER_TOPS)
+
+#: The Audio Movie CHOP, which plays the audio of a movie a Movie File In TOP
+#: is already decoding. Its `moviefileintop` parameter takes the TOP's path -
+#: so the audio follows whatever clip the player is on with nothing telling it,
+#: in the same way the clip list's highlight does.
+AUDIO_MOVIE_PREFIX = "audio"
+
+#: The two Math CHOPs per strip that do the actual mixing, and the two Rename
+#: CHOPs that name their output.
+#:
+#: **One Math CHOP does both jobs.** `chanop = avg` collapses the clip's stereo
+#: pair to one channel, and the same node's `gain` carries the level, the pan
+#: law and the fade share. The Math CHOP's help gives the order the four stages
+#: run in - Channel Pre OP, Combine Channels, Combine CHOPs, Channel Post OP -
+#: and the Mult-Add page's gain is applied after them, so the sum happens first
+#: and the gain scales the summed result. That order is why this is one node
+#: rather than a mono node feeding a gain node.
+AUDIO_LEFT_PREFIX = "left"
+AUDIO_RIGHT_PREFIX = "right"
+AUDIO_NAME_LEFT_PREFIX = "nameL"
+AUDIO_NAME_RIGHT_PREFIX = "nameR"
+AUDIO_STRIP_PREFIX = "strip"
+
+#: The sum of both strips, and the device it goes to.
+AUDIO_MIX_CHOP = "mix"
+AUDIO_OUT_CHOP = "audioOut"
+
+#: Combine Channels: Average. **Not Add.** `add` is L+R, which clips on
+#: correlated material, and most music is correlated. `avg` is (L+R)/2 and
+#: cannot, at the cost of sitting 6 dB below a hard sum - which the level
+#: control makes back. Both tokens are in the Math CHOP's own help.
+AUDIO_MONO_OP = "avg"
+
+#: Combine CHOPs: Add, matching channels by index. The two strips are the same
+#: two channel names in the same order by the time they reach here, so name and
+#: index agree; index is set because it is the one that says what is meant.
+AUDIO_SUM_OP = "add"
+AUDIO_SUM_MATCH = "index"
+
+#: What the Rename CHOPs match and what they write.
+#:
+#: A dedicated Rename CHOP rather than the rename fields on each Math CHOP's
+#: Common page, and the reason is that the install disagrees with itself about
+#: what those are called: `Math_CHOP.htm` names them `commonrenamefrom` and
+#: `commonrenameto`, while the type stub at `bin/Lib/tdi/ops/chops/mathCHOP.py`
+#: names them `renamefrom` and `renameto`. The Rename CHOP's own parameters are
+#: `renamefrom`/`renameto` in **both**, so this is the spelling that is not a
+#: coin flip. Two nodes per strip is the price.
+#:
+#: `*` matches whatever single channel the average produced, whose name is not
+#: documented anywhere and does not need to be.
+AUDIO_RENAME_FROM = "*"
+
+#: Cook Every Frame on the Audio Device Out CHOP. Its help: "This should be
+#: checked on at all times when outputing audio." Set rather than left to a
+#: default, because the failure is silence with nothing in the log.
+AUDIO_OUT_COOK_ALWAYS = True
 
 #: Length Type and Units for the fade timer, same tokens as the dwell's. The
 #: length itself is **not** bound: it is `Dwell * Fade`, a product of two
@@ -420,6 +506,28 @@ SETTINGS_ROW_COMP = "settingsRow"
 SETTINGS_ROW_HEIGHT = 100
 PARAMETER_COMP = "parameters"
 PARAMETER_HEIGHT = 170
+
+#: The mixer's band, drawn as a second settings row under the first. One row
+#: per custom page, which is what `settings.Setting.page` decides - and the
+#: reason there are two rows rather than one long one is arithmetic:
+#: `_slider_width` shares the panel between the sliders on a row, so seven
+#: sliders in a row would be seven thin sliders.
+AUDIO_ROW_COMP = "audioRow"
+AUDIO_ROW_HEIGHT = SETTINGS_ROW_HEIGHT
+
+#: The panel's rows, top to bottom. A row's position in this tuple **is** its
+#: `alignorder`, so inserting a row is inserting a name here rather than
+#: renumbering every row below it by hand - which is what the previous version
+#: needed, and what the comment above the diagnostics strip was compensating
+#: for by naming the clip list's number in prose.
+PANEL_ROWS = (
+    "transport",
+    "settings",
+    "audio",
+    "parameters",
+    "cliplist",
+    "diagnostics",
+)
 
 #: Toggle Down: on when pushed, off when pushed again. These are values, not
 #: actions, which is the whole difference between this row and the transport
@@ -817,8 +925,13 @@ def build():
 
     table = _place(startup.create(container, td.tableDAT, PLAYLIST_DAT), 0, 0)
     rows = _fill_playlist(table, td)
-    out = _add_player(container, rows, configuration, td)
+    out, players = _add_player(container, rows, configuration, td)
     _add_cycle(container, configuration, td)
+    # After the players, which it reads, and after the fade's state and timer,
+    # which its gains reference: an expression written against an operator that
+    # does not exist yet holds the error even once the operator arrives. Both
+    # are built inside `_add_player`.
+    _add_audio(container, players, configuration, td)
     # The table before the listener that reads it: the MIDI In DAT hears
     # nothing without a device mapping, and this is where one comes from.
     _ensure_device_table(td)
@@ -1095,6 +1208,7 @@ def _panel_height():
     rows = (
         BUTTON_HEIGHT,
         SETTINGS_ROW_HEIGHT,
+        AUDIO_ROW_HEIGHT,
         PARAMETER_HEIGHT,
         CLIP_LIST_HEIGHT,
         DIAGNOSTICS_HEIGHT,
@@ -1102,21 +1216,31 @@ def _panel_height():
     return sum(rows) + max(len(rows) - 1, 0) * PANEL_SPACING
 
 
-def _slider_width():
-    """How wide each settings slider is: the row, less the toggles and gaps.
+def _row_order(name):
+    """A row's `alignorder`, from its place in `PANEL_ROWS`."""
+    return PANEL_ROWS.index(name)
+
+
+def _slider_width(page=None):
+    """How wide each slider on that page is: the row, less its toggles and gaps.
 
     The toggles take a fixed width so the row lines up with the transport above
     it, and the sliders absorb whatever that leaves - so a button width changed
     at the top of this file moves the sliders rather than opening a strip of
     dead panel beside them.
+
+    Per page, because a page is a row: the mixer's four sliders divide the
+    panel between themselves and know nothing about the cycle's three above
+    them. Passing `None` measures every setting as one row, which is what the
+    single-row panel did and is no longer how any row is drawn.
     """
     from . import settings
 
-    count = len(settings.sliders())
+    count = len(settings.sliders(page))
     if count <= 0:
         return 0
-    fixed = len(settings.toggles()) * SETTINGS_TOGGLE_WIDTH
-    gaps = max(len(settings.SETTINGS) - 1, 0) * PANEL_SPACING
+    fixed = len(settings.toggles(page)) * SETTINGS_TOGGLE_WIDTH
+    gaps = max(len(settings.on_page(page)) - 1, 0) * PANEL_SPACING
     return max(_panel_width() - fixed - gaps, 0) // count
 
 
@@ -1152,8 +1276,17 @@ def _add_control_panel(parent, container, rows, configuration, td):
     panel.viewer = True
     panel.activeViewer = True
 
+    from . import settings as settings_module
+
     _add_transport(panel, td)
-    _add_settings_row(panel, configuration, td)
+    _add_settings_row(
+        panel, configuration, settings_module.PAGE_PLAYER,
+        SETTINGS_ROW_COMP, "settings", SETTINGS_ROW_HEIGHT, td,
+    )
+    _add_settings_row(
+        panel, configuration, settings_module.PAGE_AUDIO,
+        AUDIO_ROW_COMP, "audio", AUDIO_ROW_HEIGHT, td,
+    )
     _add_parameters(panel, configuration, td)
     _add_clip_list(panel, container, rows, td)
     _add_diagnostics(panel, container, td)
@@ -1193,9 +1326,11 @@ def _add_diagnostics(panel, container, td):
     startup.set_par(row, "h", DIAGNOSTICS_HEIGHT)
     startup.set_menu(row, "align", TRANSPORT_ALIGN)
     startup.set_par(row, "spacing", PANEL_SPACING)
-    # After the clip list, which is alignorder 3 - so this sits at the bottom
-    # and the list keeps the position it has had since Phase 5a.
-    startup.set_par(row, "alignorder", 4)
+    # Last in PANEL_ROWS, so this sits at the bottom and the list keeps the
+    # position it has had since Phase 5a. The order is read from that tuple
+    # rather than written here, which is what stopped a row being inserted
+    # above from silently reshuffling the panel.
+    startup.set_par(row, "alignorder", _row_order("diagnostics"))
 
     width = max(
         (_panel_width() - PANEL_SPACING * (len(PLAYER_TOPS) - 1)) // len(PLAYER_TOPS),
@@ -1244,7 +1379,7 @@ def _add_transport(panel, td):
     startup.set_par(transport, "h", BUTTON_HEIGHT)
     startup.set_menu(transport, "align", TRANSPORT_ALIGN)
     startup.set_par(transport, "spacing", PANEL_SPACING)
-    startup.set_par(transport, "alignorder", 0)
+    startup.set_par(transport, "alignorder", _row_order("transport"))
 
     buttons = []
     for order, (name, label) in enumerate(CONTROL_BUTTONS):
@@ -1271,15 +1406,20 @@ def _add_transport(panel, td):
     return transport
 
 
-def _add_settings_row(panel, configuration, td):
-    """Toggles and sliders for the four settings, each bound to its parameter.
+def _add_settings_row(panel, configuration, page, comp_name, row, height, td):
+    """Toggles and sliders for one page of settings, each bound to its parameter.
 
     **Nothing here has a callback.** A transport button is a shim into
     `tdpy.player`, because pressing it *does* something; these are views of a
     value, and binding is what makes a view. The consequence is the phase's
     whole argument: a toggle clicked, a number typed into the Parameter COMP
-    below, and a MIDI CC at Phase 7 all write the same parameter, and none of
-    them has to tell the others.
+    below, and a MIDI CC all write the same parameter, and none of them has to
+    tell the others. The mixer's row was the test of that claim: four sliders
+    reaching four gain expressions, and not one line of code connecting them.
+
+    One call per custom page. `page` picks the settings, `comp_name` names the
+    operator, and `row` is the key in `PANEL_ROWS` that decides where the band
+    sits vertically.
 
     A control whose parameter is missing is left unbound rather than skipped -
     `settings.parameter()` has already said which one, and a slider that moves
@@ -1287,21 +1427,22 @@ def _add_settings_row(panel, configuration, td):
     """
     from . import settings, startup
 
-    row = startup.create(panel, td.containerCOMP, SETTINGS_ROW_COMP)
-    row.nodeX, row.nodeY = 0, -200
-    startup.set_par(row, "w", _panel_width())
-    startup.set_par(row, "h", SETTINGS_ROW_HEIGHT)
-    startup.set_menu(row, "align", TRANSPORT_ALIGN)
-    startup.set_par(row, "spacing", PANEL_SPACING)
-    startup.set_par(row, "alignorder", 1)
+    band = startup.create(panel, td.containerCOMP, comp_name)
+    band.nodeX, band.nodeY = 0, -200 - 150 * _row_order(row)
+    startup.set_par(band, "w", _panel_width())
+    startup.set_par(band, "h", height)
+    startup.set_menu(band, "align", TRANSPORT_ALIGN)
+    startup.set_par(band, "spacing", PANEL_SPACING)
+    startup.set_par(band, "alignorder", _row_order(row))
 
-    for order, setting in enumerate(settings.SETTINGS):
+    drawn = settings.on_page(page)
+    for order, setting in enumerate(drawn):
         if setting.kind == "toggle":
-            control = _add_settings_toggle(row, setting, td)
+            control = _add_settings_toggle(band, setting, td)
         else:
-            control = _add_settings_slider(row, setting, td)
+            control = _add_settings_slider(band, setting, page, td)
         control.nodeX, control.nodeY = 0, -150 * order
-        startup.set_par(control, "h", SETTINGS_ROW_HEIGHT)
+        startup.set_par(control, "h", height)
         startup.set_par(control, "label", setting.label)
         startup.set_par(control, "alignorder", order)
 
@@ -1313,15 +1454,15 @@ def _add_settings_row(panel, configuration, td):
             startup.bind(control.par.value0, master)
 
     startup.report(
-        f"[{startup.PACKAGE}] settings row at {row.path}: "
+        f"[{startup.PACKAGE}] {page.lower()} row at {band.path}: "
         + ", ".join(
             setting.node
             if setting.kind == "toggle"
             else f"{setting.node} {setting.minimum:g}-{setting.maximum:g}"
-            for setting in settings.SETTINGS
+            for setting in drawn
         )
     )
-    return row
+    return band
 
 
 def _add_settings_toggle(row, setting, td):
@@ -1335,7 +1476,7 @@ def _add_settings_toggle(row, setting, td):
     return toggle
 
 
-def _add_settings_slider(row, setting, td):
+def _add_settings_slider(row, setting, page, td):
     """One horizontal slider, its ends set to the setting's range.
 
     The range is the part worth watching. `valuerange0l`/`valuerange0h` are
@@ -1348,7 +1489,7 @@ def _add_settings_slider(row, setting, td):
     from . import startup
 
     slider = startup.create(row, td.sliderCOMP, setting.node)
-    startup.set_par(slider, "w", _slider_width())
+    startup.set_par(slider, "w", _slider_width(page))
     startup.set_menu(slider, "slidertype", SETTINGS_SLIDER_TYPE)
     startup.set_par(slider, SLIDER_RANGE_LOW, setting.minimum)
     startup.set_par(slider, SLIDER_RANGE_HIGH, setting.maximum)
@@ -1380,7 +1521,7 @@ def _add_parameters(panel, configuration, td):
     node.nodeX, node.nodeY = 0, -400
     startup.set_par(node, "w", _panel_width())
     startup.set_par(node, "h", PARAMETER_HEIGHT)
-    startup.set_par(node, "alignorder", 2)
+    startup.set_par(node, "alignorder", _row_order("parameters"))
     if configuration is not None:
         startup.set_par(node, "op", configuration.path)
     startup.set_par(node, "custom", True)
@@ -1413,7 +1554,7 @@ def _add_clip_list(panel, container, rows, td):
     node.nodeX, node.nodeY = 0, -600
     startup.set_par(node, "w", _panel_width())
     startup.set_par(node, "h", CLIP_LIST_HEIGHT)
-    startup.set_par(node, "alignorder", 3)
+    startup.set_par(node, "alignorder", _row_order("cliplist"))
     startup.set_par(node, "callbacks", callbacks.path)
     # One more row than there are clips: row 0 is the header, and locking it
     # keeps it visible once the list is long enough to scroll.
@@ -1583,7 +1724,10 @@ def _add_player(container, rows, configuration, td):
            else "no file - playlist is empty")
         + f", crossfading via {state.path}"
     )
-    return out
+    # The players as well as the chain's end: the mixer needs the TOPs
+    # themselves for its Audio Movie CHOPs, and looking them up again by name
+    # would be a second place that has to agree about what they are called.
+    return out, players
 
 
 def _first_clip(rows, index):
@@ -1643,6 +1787,111 @@ def _add_fade_state(container, td):
     startup.set_par(state, "const1name", FADE_TARGET_CHANNEL)
     startup.set_par(state, "const1value", 0.0)
     return state
+
+
+def _add_audio(container, players, configuration, td):
+    """The mixer: each player summed to mono, panned, and the two summed out.
+
+    Two strips and a sum, in a base COMP of their own. A strip is four
+    operators - the Audio Movie CHOP that plays the clip's sound, two Math
+    CHOPs that each average the stereo pair to one channel and scale it, and
+    two Rename CHOPs that call those results `chan1` and `chan2` - and a Merge
+    CHOP puts the pair back together as a stereo signal.
+
+    **The clip's own stereo image is deliberately thrown away.** Averaging the
+    pair makes each player a mono point source, which is what a pan control
+    places; scaling a stereo pair by two different numbers would tilt a balance
+    instead, and would leave a hard-panned element in the clip where the clip
+    put it no matter where the strip's pan was set.
+
+    **Nothing stores a gain.** Each Math CHOP's `gain` is an expression over
+    the two settings parameters and the fade, evaluated by TouchDesigner every
+    cook - so a MIDI CC, the panel slider and a typed field are three writers
+    to one parameter and none of them has to tell the mixer anything. See
+    `tdpy.audio` for the arithmetic and why the paths in it are absolute.
+
+    Returns the Audio Device Out CHOP.
+    """
+    from . import audio, settings, startup
+
+    comp = _place(startup.create(container, td.baseCOMP, AUDIO_COMP), 500, -600)
+
+    # The fade, spelled from inside this COMP. The players' own container is
+    # one level up, so the mixer reaches the fade's state and timer through the
+    # container's path rather than as siblings - and it is the same template
+    # the Cross TOP's own expression is generated from.
+    share = audio.share_expressions(
+        CROSS_EXPR_TEMPLATE.format(prefix=f"{container.path}/")
+    )
+    settings_path = configuration.path if configuration is not None else ""
+
+    strips = []
+    for index, player in enumerate(players):
+        suffix = AUDIO_STRIP_SUFFIXES[index]
+        level_name, pan_name = settings.STRIPS[index]
+
+        source = _place(
+            startup.create(comp, td.audiomovieCHOP, AUDIO_MOVIE_PREFIX + suffix),
+            0, -200 * index,
+        )
+        # The TOP's own path rather than a relative hop out of this COMP: the
+        # build knows it, and it is the same choice the diagnostics strip makes
+        # about the Info CHOPs it reads.
+        startup.set_par(source, "moviefileintop", player.path)
+        startup.set_par(source, "play", True)
+
+        sides = []
+        for side, gain_prefix, name_prefix, offset in (
+            (audio.LEFT, AUDIO_LEFT_PREFIX, AUDIO_NAME_LEFT_PREFIX, 0),
+            (audio.RIGHT, AUDIO_RIGHT_PREFIX, AUDIO_NAME_RIGHT_PREFIX, -80),
+        ):
+            gain = _place(
+                startup.create(comp, td.mathCHOP, gain_prefix + suffix),
+                250, -200 * index + offset,
+            )
+            gain.inputConnectors[0].connect(source)
+            startup.set_menu(gain, "chanop", AUDIO_MONO_OP)
+            expression = audio.gain_expression(
+                settings_path, level_name, pan_name, share[index], side
+            )
+            _set_expression(gain.par.gain, expression, startup)
+            audio.report_strip(gain.name, side, expression)
+
+            named = _place(
+                startup.create(comp, td.renameCHOP, name_prefix + suffix),
+                500, -200 * index + offset,
+            )
+            named.inputConnectors[0].connect(gain)
+            startup.set_par(named, "renamefrom", AUDIO_RENAME_FROM)
+            startup.set_par(named, "renameto", side)
+            sides.append(named)
+
+        strip = _place(
+            startup.create(comp, td.mergeCHOP, AUDIO_STRIP_PREFIX + suffix),
+            750, -200 * index,
+        )
+        for position, named in enumerate(sides):
+            strip.inputConnectors[position].connect(named)
+        strips.append(strip)
+
+    mix = _place(startup.create(comp, td.mathCHOP, AUDIO_MIX_CHOP), 1000, -100)
+    for position, strip in enumerate(strips):
+        mix.inputConnectors[position].connect(strip)
+    startup.set_menu(mix, "chopop", AUDIO_SUM_OP)
+    startup.set_menu(mix, "match", AUDIO_SUM_MATCH)
+
+    out = _place(
+        startup.create(comp, td.audiodeviceoutCHOP, AUDIO_OUT_CHOP), 1250, -100
+    )
+    out.inputConnectors[0].connect(mix)
+    startup.set_par(out, "cookalways", AUDIO_OUT_COOK_ALWAYS)
+
+    startup.report(
+        f"[{startup.PACKAGE}] audio at {comp.path}: "
+        f"{len(strips)} strips summed into {out.name}"
+        + ("" if settings_path else " - no settings COMP, gains will not resolve")
+    )
+    return out
 
 
 def _add_cycle(container, configuration, td):

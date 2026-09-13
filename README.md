@@ -84,6 +84,36 @@ count is what it looks like. `hardware_decode` reading 0 on H.264 media is worth
 knowing too; the `Hardware Decode` parameter does nothing for Hap and NotchLC,
 which are always hardware decoded, which is one argument for re-encoding.
 
+## Audio
+
+Each player has a mixer strip, in the `audio` COMP inside the build container.
+A strip takes the clip's sound from an Audio Movie CHOP, **averages the stereo
+pair down to one channel**, and places that mono source in the stereo field
+with its own pan control. The two strips are summed into an Audio Device Out
+CHOP.
+
+The clip's own stereo image is discarded on purpose. Panning is placing a
+source, and a source has to be a point before it can be placed; scaling a
+stereo pair by two different numbers would tilt a balance instead, and would
+leave anything the clip hard-panned exactly where the clip put it.
+
+Four controls, on the panel's `Audio` row and in the Parameter COMP:
+`level A` / `level B` (0 to 1, full by default) and `pan A` / `pan B` (0 = hard
+left, 0.5 = centre, 1 = hard right — the same convention the Audio Device Out
+CHOP's own `pan` parameter uses). The pan law is constant power: a centred
+source sits 3 dB down on both sides rather than the 6 dB a linear law costs.
+
+**The sound follows the picture.** Each strip's gain is multiplied by that
+player's share of the crossfade, computed from the same expression that drives
+the Cross TOP rather than from a reading of it. So the hidden player — which is
+decoding the next clip for the whole of a dwell — is silent until its fade
+begins, and there is no arrangement of the two in which what you hear is not
+what you see.
+
+Nothing stores a gain. Each Math CHOP's `gain` is a parameter expression over
+the two settings and the fade, so a MIDI CC, the panel slider and a typed field
+are three writers to one parameter with nothing synchronising them.
+
 ## Tests
 
 The playlist scan is plain Python over plain files, so it is tested outside
