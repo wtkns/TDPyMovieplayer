@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from tdpy import build, startup  # noqa: E402
+from tdpy import build, controls, startup  # noqa: E402
 
 
 class FakeTd:
@@ -285,3 +285,98 @@ class TestDiagnosticsExpression:
         for channel, _, _ in build.DIAGNOSTIC_CHANNELS:
             assert channel in published, f"{channel} is not on this operator"
         assert "dropped_frames" not in published
+
+
+class FakePulsePar:
+    """A pulse parameter: it can be fired, and it counts. Nothing else.
+
+    Deliberately without a value to read or assign. `build.pulse` exists
+    because assigning to a pulse parameter is not the same as firing it, and a
+    fake that accepted an assignment would let that mistake back in.
+    """
+
+    def __init__(self):
+        self.pulses = 0
+
+    def pulse(self):
+        self.pulses += 1
+
+
+class FakeWindowPars:
+    def __init__(self):
+        self.winopen = FakePulsePar()
+
+
+class FakeWindow:
+    """A Window COMP with a Open as Separate Window pulse and an open state.
+
+    `isOpen` is here and nothing reads it, on purpose: it is a real member of
+    `windowCOMP`, it was the candidate guard for this function, and the
+    decision was to pulse regardless. A test below states that by setting it.
+    """
+
+    def __init__(self, path, is_open=False):
+        self.path = path
+        self.par = FakeWindowPars()
+        self.isOpen = is_open
+
+
+class FakeParent:
+    def __init__(self, windows):
+        self.path = "/project1"
+        self._windows = windows
+
+    def op(self, name):
+        return self._windows.get(name)
+
+
+class TestReopenWindows:
+    """The rebuild button's second half - see `tdpy/controls.py`'s CALLBACK."""
+
+    def _both(self, **kwargs):
+        return FakeParent({
+            build.VIDEO_WINDOW_COMP: FakeWindow("/project1/videoPlayerWindow", **kwargs),
+            build.CONTROL_WINDOW_COMP: FakeWindow("/project1/controlPanelWindow", **kwargs),
+        })
+
+    def test_it_pulses_both_windows(self, silent):
+        parent = self._both()
+        reopened = build._reopen_windows_under(parent)
+        assert len(reopened) == 2
+        assert all(window.par.winopen.pulses == 1 for window in reopened)
+        assert silent == []
+
+    def test_an_open_window_is_pulsed_anyway(self, silent):
+        # The decision, stated as a test. Guarding on isOpen would make the
+        # button do nothing for a window that is open but buried behind the
+        # editor, which is one of the cases it is clicked for. The cost is a
+        # display mode change on the exclusive video window every click.
+        parent = self._both(is_open=True)
+        reopened = build._reopen_windows_under(parent)
+        assert [window.par.winopen.pulses for window in reopened] == [1, 1]
+
+    def test_a_missing_window_does_not_stop_the_other(self, silent):
+        # A failed build never made them, and startup.build() swallowed the
+        # exception - so the button runs this against a parent holding neither.
+        survivor = FakeWindow("/project1/controlPanelWindow")
+        parent = FakeParent({build.CONTROL_WINDOW_COMP: survivor})
+        reopened = build._reopen_windows_under(parent)
+        assert reopened == [survivor]
+        assert survivor.par.winopen.pulses == 1
+        assert len(silent) == 1
+        assert build.VIDEO_WINDOW_COMP in silent[0]
+
+    def test_neither_window_is_reported_twice_and_raises_nothing(self, silent):
+        assert build._reopen_windows_under(FakeParent({})) == []
+        assert len(silent) == 2
+
+    def test_the_button_calls_it_after_reloading(self):
+        # The shim is a string, so nothing else would catch a rename of
+        # reopen_windows - the button would simply stop working, at the moment
+        # it is clicked rather than when the code is edited.
+        assert hasattr(build, "reopen_windows")
+        callback = controls.CALLBACK
+        assert "build.reopen_windows()" in callback
+        assert callback.index("tdpy.startup.reload()") < callback.index(
+            "build.reopen_windows()"
+        )

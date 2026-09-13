@@ -218,6 +218,65 @@ def pause():
     return _set_play(False)
 
 
+def toggle():
+    """Pause if running, resume if held. Returns the players, or None.
+
+    For a controller with one button where the panel has two. The panel keeps
+    `play` and `pause` as separate momentary buttons - two buttons that each
+    do one thing cannot lie about the state, and neither shows it - but a MIDI
+    button that only ever paused would be a control with no way back, which is
+    what it was on its first evening.
+
+    **Reads the state rather than remembering it.** `play` has five writers by
+    now - both panel buttons, `_step()` on every clip change, a hand on the
+    parameter, and this - so a Python bool tracking "are we paused" would be a
+    sixth thing to keep in step with the one that actually knows. Asking the
+    player costs a parameter read.
+    """
+    return _set_play(not playing())
+
+
+def playing():
+    """Whether the clip on screen is running. False if there is no player.
+
+    The one place the transport's state is read, so the LED on a controller
+    and anything else that wants it are asking the same question of the same
+    parameter rather than each deriving their own answer.
+    """
+    player, _ = _ops()
+    if player is None:
+        return False
+    return bool(player.par.play.eval())
+
+
+#: How close the fade's two ends must be to count as settled. A blend is drawn
+#: in 8 bits per channel, so a difference below this cannot be seen anyway.
+FADE_SETTLED = 1.0 / 255
+
+
+def is_fading():
+    """Whether a crossfade is in flight.
+
+    Derived, like everything else about the fade: the Constant CHOP holds the
+    blend's two ends, and `on_fade_done` settles them to the same number when
+    the fade finishes. So the two disagreeing *is* a fade in progress, and
+    there is no flag to set, unset, or forget to unset on a rebuild.
+
+    Compared with a tolerance rather than `!=` because both ends are floats
+    that arrive by way of a Timer CHOP's fraction. An exact comparison would
+    call a settled fade unsettled on whatever the last bit rounded to.
+    """
+    container = _container()
+    if container is None:
+        return False
+    state = _fade_state(container)
+    if state is None:
+        return False
+    start = state.par.const0value.eval()
+    target = state.par.const1value.eval()
+    return abs(target - start) > FADE_SETTLED
+
+
 def clip_paths(table):
     """The playlist's `path` column, without its header, or [].
 
@@ -845,6 +904,7 @@ def _redraw():
 COMMANDS = {
     "play": play,
     "pause": pause,
+    "toggle": toggle,
     "previous": previous_clip,
     "next": next_clip,
     "shuffle": shuffle,

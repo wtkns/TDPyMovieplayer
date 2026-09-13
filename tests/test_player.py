@@ -250,7 +250,20 @@ class TestCommand:
         from tdpy import build
 
         names = {name for name, _ in build.CONTROL_BUTTONS}
-        assert names == set(player.COMMANDS)
+        assert names <= set(player.COMMANDS)
+
+    def test_a_command_may_exist_without_a_panel_button(self):
+        # This was an equality until Phase 7. `toggle` is a command with no
+        # button on the panel and is meant to stay that way: the panel has play
+        # and pause side by side, where two buttons that each do one thing
+        # cannot lie about the state, and a controller with one button needs
+        # the version that flips. The direction that matters is still checked
+        # above - a button wired to nothing is the failure worth catching.
+        from tdpy import build
+
+        names = {name for name, _ in build.CONTROL_BUTTONS}
+        assert "toggle" in player.COMMANDS
+        assert "toggle" not in names
 
     def test_an_unknown_command_reports_rather_than_raises(self, silent):
         assert player.command("rewind") is None
