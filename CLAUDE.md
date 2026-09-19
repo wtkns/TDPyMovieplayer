@@ -22,6 +22,12 @@ The general code rules — verify API symbols against the install, no silent `ge
 - **Nothing may require the `.toe` to have been saved.** It carries one Execute DAT and no project state, and every setting the project depends on is written by `build.py` on launch. A setting made by hand in the GUI is a note to add it to the build, not a reason to save.
 - **`COMP.create()` appends a digit to the name**, even when the name is free. Use `startup.create()` anywhere the new node's name is referred to again.
 
+## Running the tests
+
+`dev_vEnv/Scripts/python -m pytest`. The other environment, `TDPyMovieplayer_vEnv`, is TouchDesigner's and has no pytest - and `python` on this machine's PATH resolves to it, so a bare `python -m pytest` fails and reads as a suite that cannot run. `requirements-dev.txt` says how to rebuild `dev_vEnv`.
+
+**Rebuild does not reload `spikes/`.** `startup.reload()` drops modules under `tdpy.` only, so after editing a spike, reload it by hand before running it: `import importlib, spikes.baseline; b = importlib.reload(spikes.baseline)`.
+
 ## Running a control
 
 Clear the bytecode cache in this repository, leaving the virtual environment alone: `find . -name __pycache__ -type d -not -path "./*_vEnv/*" -exec rm -rf {} +`.
