@@ -167,12 +167,6 @@ class TestSeedAndShuffle:
         yield
         player.SEED = before
 
-    @pytest.fixture(autouse=True)
-    def no_redraw(self, monkeypatch):
-        # _redraw reaches into TouchDesigner for the List COMP. The seed is
-        # what these tests are about.
-        monkeypatch.setattr(player, "_redraw", lambda: None)
-
     def test_a_launch_starts_in_playlist_order(self):
         # The default this project ships in, and the thing jms asked for
         # explicitly: shuffle is a button, not a mode it boots into.
@@ -804,3 +798,52 @@ class TestRefreshDwell:
     def test_a_missing_player_is_not_an_exception(self, setting, timer, monkeypatch):
         monkeypatch.setattr(player, "_ops", lambda: (None, None))
         assert player.refresh_dwell() is None
+
+
+class FakeRoot:
+    """A component's top level: named children and nothing else."""
+
+    def __init__(self, path, children=None):
+        self.path = path
+        self.children = dict(children or {})
+
+    def op(self, name):
+        return self.children.get(name)
+
+
+class TestWhereThePlayerIs:
+    """Since 9.4 the network this module drives is in the engine's process."""
+
+    @pytest.fixture
+    def engine_process(self, monkeypatch):
+        from tdpy import build, engine
+
+        container = FakeRoot(f"/engineSource/{build.BUILD_ROOT}")
+        root = FakeRoot("/engineSource", {build.BUILD_ROOT: container})
+        monkeypatch.setattr(engine, "root", lambda: root)
+        return container
+
+    def test_it_finds_the_container_under_the_components_top_level(
+        self, engine_process, silent
+    ):
+        assert player._container() is engine_process
+        assert silent == []
+
+    def test_in_the_host_it_says_where_the_transport_actually_is(
+        self, monkeypatch, silent
+    ):
+        # Not the host's own `generated` container, which exists and holds the
+        # playlist and MIDI: answering that would send every lookup below into
+        # a container with no players in it, one silent miss at a time.
+        from tdpy import engine
+
+        monkeypatch.setattr(engine, "ROOT", None)
+        assert player._container() is None
+        assert "tdpy.engine.send" in silent[0]
+
+    def test_a_component_that_has_not_built_yet_says_so(self, monkeypatch, silent):
+        from tdpy import engine
+
+        monkeypatch.setattr(engine, "root", lambda: FakeRoot("/engineSource"))
+        assert player._container() is None
+        assert "has the component built?" in silent[0]

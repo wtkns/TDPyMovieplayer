@@ -49,6 +49,53 @@ class TestParameters:
         assert link.valid_parameter("Speed2")
 
 
+class TestCommands:
+    def test_every_command_and_the_parameter_that_carries_it(self):
+        assert [tuple(item) for item in link.commands()] == [
+            ("play", "Play"),
+            ("pause", "Pause"),
+            ("toggle", "Toggle"),
+            ("previous", "Previous"),
+            ("next", "Next"),
+            ("shuffle", "Shuffle"),
+            ("toggle_a", "Togglea"),
+            ("toggle_b", "Toggleb"),
+            ("next_a", "Nexta"),
+            ("next_b", "Nextb"),
+        ]
+
+    def test_the_commands_are_the_transport_the_project_already_had(self):
+        # The direction that matters: a command the panel or the MIDI map can
+        # ask for and the .tox never declared is a button that does nothing,
+        # and nothing would report it until it was pressed.
+        from tdpy import player
+
+        assert {item.name for item in link.commands()} == set(player.COMMANDS)
+
+    def test_every_command_parameter_is_a_name_touchdesigner_will_create(self):
+        assert [
+            item.parameter
+            for item in link.commands()
+            if not link.valid_parameter(item.parameter)
+        ] == []
+
+    def test_no_command_is_spelled_like_a_setting(self):
+        # Both live on the same COMP - the component's top level - so a
+        # collision would be one parameter doing two jobs, and the loser would
+        # be whichever was appended second.
+        assert set(link.parameters()).isdisjoint(
+            item.parameter for item in link.commands()
+        )
+
+    def test_a_parameter_names_the_command_it_came_from(self):
+        assert link.command_for("Nextb") == "next_b"
+
+    def test_a_parameter_no_command_owns_is_none(self):
+        # The control for the test above: this arrives from another process,
+        # so it has to be able to say no rather than guess.
+        assert link.command_for("Reload") is None
+
+
 class TestOutputs:
     def test_the_outputs_by_name_family_and_label(self):
         assert [tuple(item) for item in link.OUTPUTS] == [
@@ -77,6 +124,41 @@ class TestOutputs:
     def test_a_wrong_name_raises_and_lists_the_real_ones(self):
         with pytest.raises(KeyError, match="program_video"):
             link.output("program")
+
+    def test_the_decks_in_player_order(self):
+        # The index into either of these is the index into `build.PLAYER_TOPS`,
+        # the Cross TOP's inputs and the mixer's strips. A pair the other way
+        # round would put deck B's picture on deck A's output, which looks like
+        # a controller mapped wrongly rather than a table in the wrong order.
+        assert link.DECK_VIDEO == ("deck_a_video", "deck_b_video")
+        assert link.DECK_AUDIO == ("deck_a_audio", "deck_b_audio")
+
+
+class TestDeclared:
+    def test_what_the_component_carries_today(self):
+        assert link.DECLARED == (
+            "program_video",
+            "program_audio",
+            "deck_a_video",
+            "deck_a_audio",
+            "deck_b_video",
+            "deck_b_audio",
+        )
+
+    def test_the_state_and_playlist_outputs_are_named_but_not_built(self):
+        # They are in OUTPUTS because the names are decided, and out of
+        # DECLARED because 9.5 is what builds them. An Out operator with
+        # nothing behind it would be a connector answering an empty image.
+        assert {"state", "playlist"} <= {item.name for item in link.OUTPUTS}
+        assert {"state", "playlist"}.isdisjoint(link.DECLARED)
+
+    def test_every_declared_name_is_a_real_output(self):
+        assert [item.name for item in link.declared()] == list(link.DECLARED)
+
+    def test_the_families_the_host_has_to_build_a_null_for(self):
+        assert [item.family for item in link.declared()] == [
+            "TOP", "CHOP", "TOP", "CHOP", "TOP", "CHOP"
+        ]
 
 
 class TestState:

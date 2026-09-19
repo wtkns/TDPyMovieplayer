@@ -5,9 +5,16 @@ TouchDesigner process of its own. This module is both ends of that component's
 life: `BOOTSTRAP` is the text of the one Execute DAT the host saves into the
 `.tox`, and `main()` is what that DAT calls once the component has loaded.
 
-**9.3 builds a trivial network only** - a Text TOP naming the engine's process
-and frame, through the `program_video` output - to prove generate, save, load
-and reload before anything real moves across. The player arrives at 9.4.
+**9.4 moves the player in.** `main()` builds the playlist, both players, the
+fade, the dwell and the mixer under the component's top level, and puts them
+through the Out operators the host generated. What stayed in the host is the
+window, the audio device, MIDI, the panel and the settings.
+
+It is also the two directions of the boundary, which are not symmetrical and
+cannot be: `Engine_COMP.htm` says parameters "work in one direction only - you
+cannot set a parameter from within the loaded .tox". So the host reaches the
+engine by pulsing a parameter (`send`), the engine answers that pulse
+(`on_command`), and everything travelling the other way is an output.
 
 Four facts from the Phase 9 spikes shape the bootstrap, each on 330.0020:
 
@@ -17,7 +24,10 @@ Four facts from the Phase 9 spikes shape the bootstrap, each on 330.0020:
   `.tox`'s folder, so the repository cannot be found from them. Its path is
   written into the bootstrap's text when the host generates it, since the host
   regenerates the `.tox` on every build and so the text is never older than the
-  repository it names.
+  repository it names. The *media* paths are a different question with a
+  different answer: they are relative too, and the Engine COMP's Asset Paths
+  parameter is what makes them resolve against the `.toe` rather than against
+  `out/` - see `build.ENGINE_ASSET_PATHS`.
 - Reloading keeps the engine process and its `sys.modules`, so the bootstrap
   drops the package before importing it - otherwise a reload after an edit
   would run the code that was loaded first.
@@ -62,8 +72,50 @@ def onCreate():
     return
 '''
 
-#: The Text TOP 9.3 puts through the program output.
-PROBE_TOP = "probe"
+#: The component's top level as a path, once `main()` has run in this process,
+#: and None everywhere else.
+#:
+#: **This is how the two processes are told apart**, and it is the whole of the
+#: mechanism. `player` and `settings` ask for it to find the network and the
+#: parameters they work on; in the host it answers None, and those modules say
+#: so rather than looking somewhere plausible and finding an empty container.
+#:
+#: Not state in the sense this project keeps refusing to keep. It is written
+#: once per load by the function that creates the network, and the bootstrap
+#: drops this module before every reload - so it cannot outlive the component
+#: it names, which is the property a cached path would lack.
+ROOT = None
+
+#: The Select operator each family of output is tapped through, and the
+#: parameter naming what it selects. Read off the type stubs at
+#: `bin/Lib/tdi/ops/tops/selectTOP.py` and `chops/selectCHOP.py`.
+#:
+#: A Select rather than a wire because the Out operators are at the component's
+#: top level and everything they carry is built inside a container one level
+#: down, and a wire joins siblings. The container is what lets `main()` be
+#: called twice - it is destroyed and rebuilt whole, exactly as `build()` does
+#: in the host.
+SELECT_PARAMETER = {"TOP": "top", "CHOP": "chops"}
+
+#: What each Select is called: the output it feeds, prefixed. The Out operator
+#: already has the bare name, and two operators at one level cannot share one.
+SELECT_PREFIX = "select_"
+
+
+def root():
+    """The component's top level if this is the engine's process, else None.
+
+    The check comes before the import, which is not only tidiness: in the host
+    there is nothing to look up, and a module that answers "not the engine"
+    without needing TouchDesigner at all is one that can be tested for saying
+    it.
+    """
+    if ROOT is None:
+        return None
+
+    import td
+
+    return td.op(ROOT)
 
 
 def bootstrap_source(repo):
@@ -77,33 +129,134 @@ def bootstrap_source(repo):
 
 
 def main(root):
-    """Build the engine's network under `root`, the component's top level.
+    """Build the player under `root`, the component's top level. Returns it.
 
     Called by the bootstrap's `onCreate`, on every load and every reload. A
-    reload brings the `.tox` back as it was saved, which is the bootstrap and
-    the Out operators and nothing else, so each call starts from that - the
-    probe is destroyed first only in case something calls this twice without
-    a reload.
+    reload brings the `.tox` back as it was saved - the bootstrap, the Out
+    operators and the custom parameters, and nothing behind them - so each call
+    starts from that and builds the network again. Which is the point of the
+    component being generated rather than saved: an edit to `tdpy/build.py`
+    arrives with a rebuild, not with a regenerated file.
 
-    Raises if the program output is missing, because that means the host
-    generated the `.tox` wrongly, and a raise is what reaches the host.
+    Raises if an output is missing, because that means the host generated the
+    `.tox` wrongly, and a raise is what reaches the host - the Engine COMP's
+    `errors()`, traceback included, per spike 4.
+    """
+    global ROOT
+
+    import td
+
+    from . import build, link, startup
+
+    ROOT = root.path
+    pid = os.getpid()
+
+    container = build.build_player(root)
+    sources = build.engine_sources(container)
+
+    wired = []
+    for item in link.declared():
+        out = root.op(item.name)
+        if out is None:
+            raise LookupError(
+                f"no {item.name} Out {item.family} in {root.path} - regenerate the .tox"
+            )
+        source = sources.get(item.name)
+        if source is None:
+            found = sorted(name for name in sources if sources[name] is not None)
+            raise LookupError(
+                f"nothing in {container.path} to feed {item.name}"
+                f" - have {', '.join(found)}"
+            )
+
+        select = _tap(root, item, source, td)
+        out.inputConnectors[0].connect(select)
+        wired.append(item.name)
+
+    startup.report(
+        f"[engine pid {pid}] built {container.path} into {len(wired)} output(s):"
+        f" {', '.join(wired)}"
+    )
+    return container
+
+
+def _tap(root, item, source, td):
+    """The Select operator carrying one output from inside the container.
+
+    Destroyed first rather than converged onto: a Select whose family changed
+    would otherwise keep the operator it was and quietly refuse to carry the
+    new one. Nothing here survives a reload anyway.
+    """
+    from . import startup
+
+    kinds = {"TOP": td.selectTOP, "CHOP": td.selectCHOP}
+    kind = kinds.get(item.family)
+    if kind is None:
+        raise LookupError(
+            f"no Select for a {item.family} output - have {', '.join(sorted(kinds))}"
+        )
+
+    name = SELECT_PREFIX + item.name
+    previous = root.op(name)
+    if previous is not None:
+        previous.destroy()
+    select = startup.create(root, kind, name)
+    startup.set_par(select, SELECT_PARAMETER[item.family], source.path)
+    return select
+
+
+def send(name):
+    """Pulse the engine's parameter for that transport command. **Host side.**
+
+    The host's half of every button press: the panel's callback and the MIDI
+    map both call this, and neither knows the engine exists beyond the name it
+    hands over. `player.command` is what runs at the other end.
+
+    Reports rather than raises throughout, for the reason `player.command`
+    does: this runs inside a Panel Execute or MIDI callback, where an exception
+    surfaces inconsistently. The case worth knowing is a press in the seconds
+    before the engine has loaded - the Engine COMP has no custom parameters
+    yet, and `build.pulse` says which one was missing.
     """
     import td
 
-    from . import link, startup
+    from . import build, link, startup
 
-    pid = os.getpid()
-    name = link.output("program_video").name
-    out = root.op(name)
-    if out is None:
-        raise LookupError(f"no {name} Out TOP in {root.path} - regenerate the .tox")
+    known = {item.name: item.parameter for item in link.commands()}
+    parameter = known.get(name)
+    if parameter is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no transport command {name!r}"
+            f" - have {', '.join(sorted(known))}"
+        )
+        return None
 
-    previous = root.op(PROBE_TOP)
-    if previous is not None:
-        previous.destroy()
-    probe = startup.create(root, td.textTOP, PROBE_TOP)
-    probe.par.text.expr = f"'engine pid {pid}  frame ' + str(absTime.frame)"
-    out.inputConnectors[0].connect(probe)
+    parent = td.op(build.BUILD_PARENT) or td.op("/")
+    comp = parent.op(build.ENGINE_COMP)
+    if comp is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.ENGINE_COMP} under {parent.path}"
+            f" - {name} went nowhere"
+        )
+        return None
+    return build.pulse(comp, parameter)
 
-    startup.report(f"[engine pid {pid}] built {probe.path} into {out.path}")
-    return probe
+
+def on_command(parameter):
+    """Run the command a pulse parameter stands for. **Engine side.**
+
+    Called by the Parameter Execute DAT `build._add_commands` puts beside the
+    player, which watches the component's own custom parameters. The name
+    arrives from another process, so an unknown one is reported with the list
+    rather than raised on.
+    """
+    from . import link, player, startup
+
+    name = link.command_for(parameter)
+    if name is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no command on parameter {parameter!r}"
+            f" - have {', '.join(item.parameter for item in link.commands())}"
+        )
+        return None
+    return player.command(name)

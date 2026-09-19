@@ -4,8 +4,20 @@ Phase 7, and it is small for a reason decided three phases ago. Every setting
 is already a custom parameter with TouchDesigner's binding doing the
 synchronising, and every transport action is already a function looked up by
 name in `player.COMMANDS`. So a knob writes the parameter the panel's slider is
-bound to and the slider follows without being told, and a button calls the same
-function the panel's button calls. Nothing here has to keep anything in step.
+bound to and the slider follows without being told, and a button asks for the
+same command the panel's button asks for. Nothing here has to keep anything in
+step.
+
+**Phase 9.4 moved the transport into another process and changed one line.**
+A button now goes through `engine.send`, which pulses that command's parameter
+on the Engine COMP; a knob still writes the settings COMP, and the engine reads
+it through an expression the host put on the same parameter. The controller did
+not become an engine control, and this module did not learn anything about the
+split beyond the name of the function it calls.
+
+**The lamps are inert at 9.4** and nothing calls `refresh_lights`. They report
+which deck is live and which is playing, both of which are facts in the other
+process now; at 9.5 they come back off the state CHOP's channels.
 
 **The Device Mapper is used once, to discover, and never to configure.**
 Corrected 2026-09-12: this docstring used to say the dialog was not used at all
@@ -25,7 +37,7 @@ derived from it is testable at a normal prompt.
 
 import collections
 
-from . import player, settings, startup
+from . import engine, player, settings, startup
 
 #: The message strings TouchDesigner hands the callback. Spelled as it spells
 #: them: the MIDI In DAT's Message filter documents "Control Change" and the
@@ -445,7 +457,11 @@ def on_message(message, channel, index, value):
         # twice per press, which on `next` is a clip skipped.
         if not is_press(message, value):
             return None
-        return player.command(entry.target)
+        # `engine.send` rather than `player.command`: the transport is in the
+        # engine's process since 9.4, and the names in `MAP` are the same names
+        # either way - `link.commands` derives the parameters from the very
+        # table `player.COMMANDS` keys this map against.
+        return engine.send(entry.target)
 
     if entry.kind == "setting":
         return apply_setting(entry.target, message, value)

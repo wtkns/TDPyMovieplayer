@@ -11,10 +11,10 @@ a misspelling there does not raise - a parameter the engine never declared is
 simply absent, and a channel the host reads that the engine never wrote reads
 as nothing. So both halves take their names from here.
 
-**Commands are not here yet.** Whether a pulse parameter crosses an Engine COMP
-is spike 1 on 160.0020; if it does not, commands become a counter channel on a
-CHOP input instead, which is a different shape of entry. Adding them waits for
-the answer rather than guessing it.
+**Commands cross as pulse parameters**, which is what spike 1 answered on
+2026-09-14: a host `.pulse()` on the Engine COMP ran `onPulse` inside the
+engine. The fallback that answer made unnecessary was a counter channel on a
+CHOP input.
 
 Nothing here imports `td`, so all of it is testable at a normal prompt.
 """
@@ -22,7 +22,7 @@ Nothing here imports `td`, so all of it is testable at a normal prompt.
 import collections
 import re
 
-from . import settings
+from . import player, settings
 
 #: A custom parameter name TouchDesigner accepts. `Custom_Parameters.htm`
 #: says the first letter must be upper case or "creation will fail", and then
@@ -47,6 +47,52 @@ def parameters():
 def valid_parameter(name):
     """Whether TouchDesigner will create a custom parameter of that name."""
     return bool(PARAMETER_NAME.match(name))
+
+
+#: One transport command, and the pulse parameter that carries it across.
+#: `name` is the key in `player.COMMANDS`, which is what the panel's buttons and
+#: `midi.MAP` already spell; `parameter` is that name as a custom parameter.
+Command = collections.namedtuple("Command", "name parameter")
+
+#: The page the command pulses go on, named for what they are rather than for
+#: the direction they travel.
+COMMAND_PAGE = "Transport"
+
+
+def command_parameter(name):
+    """A command's pulse parameter name: `toggle_a` becomes `Togglea`.
+
+    A rule rather than a table, for the reason `parameters()` derives itself
+    from the settings: a command added to `player.COMMANDS` should need nothing
+    added here. The underscore goes because `PARAMETER_NAME` refuses it, and the
+    capital arrives because TouchDesigner requires one - so the two ends of the
+    rule are the same two facts the regex above is built on.
+    """
+    return name.replace("_", "").capitalize()
+
+
+def commands():
+    """Every command that crosses, in `player.COMMANDS` order.
+
+    Derived from that table rather than listed again, so the panel's buttons,
+    the MIDI map and the engine's dispatch all key off one set of names. The
+    host pulses `parameter` on the Engine COMP; the engine turns it back into
+    `name` with `command_for` and hands it to `player.command`.
+    """
+    return tuple(Command(name, command_parameter(name)) for name in player.COMMANDS)
+
+
+def command_for(parameter):
+    """The command a pulse parameter stands for, or None if nothing does.
+
+    None rather than a raise: this answers a parameter name that arrived from
+    another process, and an unknown one is a thing to report rather than an
+    exception inside a DAT callback.
+    """
+    for command in commands():
+        if command.parameter == parameter:
+            return command.name
+    return None
 
 
 #: One top-level output of the `.tox`. `name` is the Out operator's name inside
@@ -81,12 +127,47 @@ OUTPUTS = (
 )
 
 
+#: The deck outputs in `build.PLAYER_TOPS` order, so an index into one of these
+#: is the same number that indexes the players, the Cross TOP's inputs and the
+#: mixer's strips. Spelled out rather than built from the letters, for the
+#: reason `player.COMMANDS` is: a name assembled in a loop cannot be grepped.
+DECK_VIDEO = ("deck_a_video", "deck_b_video")
+DECK_AUDIO = ("deck_a_audio", "deck_b_audio")
+
+#: The outputs the generated `.tox` carries today: the program pair and both
+#: decks. `state` and `playlist` are built at 9.5, and are in OUTPUTS above
+#: because the names are decided - not because the component carries them yet.
+#:
+#: An Out operator the engine has nothing to feed would be an output connector
+#: answering an empty image, which is a worse thing for the host to find than
+#: no connector at all.
+DECLARED = (
+    "program_video",
+    "program_audio",
+    DECK_VIDEO[0],
+    DECK_AUDIO[0],
+    DECK_VIDEO[1],
+    DECK_AUDIO[1],
+)
+
+
 def output(name):
     """The Output of that name. Raises KeyError, since a wrong name is a bug."""
     for item in OUTPUTS:
         if item.name == name:
             return item
     raise KeyError(f"no output {name!r} - have {', '.join(o.name for o in OUTPUTS)}")
+
+
+def declared():
+    """Every Output the `.tox` declares today, in DECLARED order.
+
+    The host builds one Out operator per entry when it generates the component,
+    one Null beside its own container to receive it, and wires the two together
+    by label when the engine reports ready. One list drives all three, so an
+    output added here arrives end to end.
+    """
+    return tuple(output(name) for name in DECLARED)
 
 
 #: The state output's channels, one number each.

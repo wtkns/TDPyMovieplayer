@@ -254,12 +254,11 @@ class TestColumnsAgreeWithTheRestOfTheProject:
         fixed = sum(width for _, _, width, _ in lister.COLUMNS)
         assert fixed <= build._panel_width()
 
-    def test_the_watched_parameter_is_the_one_the_clip_is_loaded_into(self):
-        # The highlight follows this parameter and nothing else. It is the
-        # coupling worth writing down, because breaking it does not fail: the
-        # list would simply stop moving, which looks like a clip that is still
-        # playing. `player.next_clip` and `build._add_player` are the two
-        # places that write it.
-        from tdpy import build
-
-        assert build.CLIP_LIST_WATCH_PAR == "file"
+    def test_no_row_is_highlighted_while_the_player_is_in_the_engine(self):
+        # The highlight followed each player's `file` through a Parameter
+        # Execute DAT, and at 9.4 the players are in another process. None is
+        # the answer every caller here already handles - `active_row` and
+        # `row_bg` were written for a player with no file loaded - so the
+        # failure this guards against is the opposite one: a host that answers
+        # a row number anyway and lights whatever happens to be there.
+        assert lister._active() is None

@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from tdpy import midi, player, settings, startup  # noqa: E402
+from tdpy import engine, midi, player, settings, startup  # noqa: E402
 
 
 @pytest.fixture
@@ -272,19 +272,23 @@ class TestDispatch:
         assert midi.on_message(midi.CONTROL_CHANGE, 1, 99, 64) is None
         assert silent == []
 
-    def test_a_mapped_button_calls_the_transport_command(self, monkeypatch, silent):
+    def test_a_mapped_button_sends_the_command_to_the_engine(self, monkeypatch, silent):
+        # `engine.send`, not `player.command`: the transport runs in the other
+        # process since 9.4. The name handed over is unchanged, which is the
+        # property worth holding - `MAP` is keyed on `player.COMMANDS` and so
+        # is `link.commands`.
         called = []
         monkeypatch.setattr(midi, "MAP", (self.BUTTON,))
-        monkeypatch.setattr(player, "command", called.append)
+        monkeypatch.setattr(engine, "send", called.append)
         midi.on_message(midi.NOTE_ON, 1, 41, 127)
         assert called == ["next"]
 
-    def test_a_button_release_does_not_call_it_again(self, monkeypatch, silent):
+    def test_a_button_release_does_not_send_it_again(self, monkeypatch, silent):
         called = []
         monkeypatch.setattr(midi, "MAP", (self.BUTTON, self.BUTTON._replace(
             message=midi.NOTE_OFF
         )))
-        monkeypatch.setattr(player, "command", called.append)
+        monkeypatch.setattr(engine, "send", called.append)
         midi.on_message(midi.NOTE_ON, 1, 41, 127)
         midi.on_message(midi.NOTE_OFF, 1, 41, 0)
         assert called == ["next"]

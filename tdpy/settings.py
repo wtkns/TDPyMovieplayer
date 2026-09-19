@@ -276,21 +276,21 @@ def attributes(setting):
     }
 
 
-def ensure(parent, td):
-    """The settings COMP, converged onto rather than rebuilt. Returns it.
+def declare(comp):
+    """Append every setting to `comp` as a custom parameter. Returns the new ones.
 
-    Created beside the build container and never destroyed by `build()`, so the
-    values survive a rebuild - which is the point of them being here rather
-    than inside. A parameter that is missing is appended and seeded with its
-    default; one that already exists keeps its value and takes any change to
-    its label or range.
+    Two COMPs are declared from this specification and they are in different
+    processes. The host's is the settings COMP below, where the values live and
+    the panel writes them. The engine's is the generated component's own top
+    level, whose parameters the host fills with expressions over those same
+    values - so a setting added to SETTINGS appears on both sides of the process
+    boundary with nothing mapping between two vocabularies.
+
+    Converge rather than replace, in both places: a parameter that is missing is
+    appended and seeded with its default, and one that already exists keeps its
+    value and takes any change to its label or range. See `startup.custom_par`
+    for why appending unconditionally would reset a dwell somebody was tuning.
     """
-    existing = parent.op(build.SETTINGS_COMP)
-    comp = existing if existing is not None else startup.create(
-        parent, td.baseCOMP, build.SETTINGS_COMP
-    )
-    comp.nodeX, comp.nodeY = -250, -450
-
     made = []
     for setting in SETTINGS:
         parameter, created = startup.custom_par(
@@ -309,6 +309,28 @@ def ensure(parent, td):
             # yet. This is the one place a value is written from code.
             parameter.val = setting.default
             made.append(setting.name)
+    return made
+
+
+def ensure(parent, td):
+    """The host's settings COMP, converged onto rather than rebuilt. Returns it.
+
+    Created beside the build container and never destroyed by `build()`, so the
+    values survive a rebuild - which is the point of them being here rather
+    than inside.
+
+    **This COMP is the master for both processes.** The engine's copy of the
+    parameters is filled by expression from here, because the host is the only
+    process that can reach every component: an Engine COMP's parameters go into
+    one engine and can be read by no other.
+    """
+    existing = parent.op(build.SETTINGS_COMP)
+    comp = existing if existing is not None else startup.create(
+        parent, td.baseCOMP, build.SETTINGS_COMP
+    )
+    comp.nodeX, comp.nodeY = -250, -450
+
+    made = declare(comp)
 
     startup.report(
         f"[{startup.PACKAGE}] settings at {comp.path}: "
@@ -334,13 +356,26 @@ def parameter(comp, name):
 
 
 def comp():
-    """The settings COMP as it stands now, or None.
+    """The COMP carrying the settings **in this process**, or None.
+
+    Two answers, because the settings exist on both sides of the engine
+    boundary. In the host it is the settings COMP beside the build container,
+    which is where the panel and MIDI write. In the engine it is the component's
+    own top level, whose custom parameters the host fills by expression - so
+    `value()` reads the same numbers in both processes without either half
+    knowing which one it is in.
 
     Looked up by path every time rather than cached, for the reason
     `player._ops()` does: a reference captured at import points at a corpse
     after the first rebuild.
     """
     import td
+
+    from . import engine
+
+    root = engine.root()
+    if root is not None:
+        return root
 
     parent = td.op(build.BUILD_PARENT) or td.op("/")
     return parent.op(build.SETTINGS_COMP)

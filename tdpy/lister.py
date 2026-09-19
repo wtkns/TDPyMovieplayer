@@ -13,15 +13,22 @@ The other half of the choice is what the highlight means. A lister highlights
 what the *user* picked; this has to show what is *playing*, which is not the
 same thing and would have fought the user the moment they clicked a row.
 
-**Nothing here remembers which row is active.** The active row is derived, every
-time, from the player's own `file` parameter - the same rule that keeps
+**Nothing here remembers which row is active.** The active row was derived,
+every time, from the player's own `file` parameter - the same rule that keeps
 `player.next_clip` from storing an index, applied to the display. A rebuild, a
-MIDI note, Phase 4's `advance()` and a hand edit of the parameter all move the
-highlight, because none of them is what the highlight is read from.
+MIDI note, an automatic advance and a hand edit of the parameter all moved the
+highlight, because none of them was what the highlight was read from.
 
-Ordering comes from `player.play_order()` rather than from the table top to
-bottom. Today those are the same list; at Phase 4 the deck is shuffled and this
-module does not change.
+**At 9.4 there is no highlight**, and the reason is the rule rather than an
+exception to it: the player is in the engine's process, so the parameter this
+display reads itself off is not reachable from here. Pushing the row across
+instead would be the mistake this module was built to avoid. What crosses at
+9.5 is the state CHOP, whose `row_a` and `row_b` are the same derivation
+arriving as a reading - see `_active`.
+
+Ordering comes from `player.play_order()`, which in the host answers the
+playlist's own order: the seed lives in the engine now and crosses at 9.5 as
+well, so a shuffle does not reorder this list yet.
 """
 
 from . import player, startup
@@ -184,6 +191,29 @@ def _justify(name):
     return getattr(startup.td_enum("JustifyType"), name, None)
 
 
+def _playlist_table():
+    """The playlist DAT the host draws from, or None with a line saying why.
+
+    Found here rather than through `player.playlist_table()`, which since 9.4
+    answers about the engine's copy from inside the engine. This is the host's
+    own scan, and the host is where this list is drawn; at 9.5 it becomes the
+    engine's playlist arriving as a DAT output, which is one lookup changed.
+    """
+    import td
+
+    from . import build
+
+    parent = td.op(build.BUILD_PARENT) or td.op("/")
+    container = parent.op(build.BUILD_ROOT)
+    table = None if container is None else container.op(build.PLAYLIST_DAT)
+    if table is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.PLAYLIST_DAT} under"
+            f" {build.BUILD_ROOT} - has the build run?"
+        )
+    return table
+
+
 def _table_and_order():
     """The playlist DAT and the order its rows will be played in.
 
@@ -191,15 +221,24 @@ def _table_and_order():
     this is called once per cell and once per row during a reset and the count
     is the only thing needed to ask `player` for the order.
     """
-    table = player.playlist_table()
+    table = _playlist_table()
     count = 0 if table is None else max(table.numRows - 1, 0)
     return table, player.play_order(count)
 
 
 def _active():
-    """Which list row is playing right now, or None."""
-    index, count = player.now_playing()
-    return active_row(player.play_order(count), index)
+    """Which list row is playing right now. **None until 9.5.**
+
+    The clip on screen is decided in the engine's process and read off a player
+    there, so the host cannot answer this today. None is what every caller here
+    already handles - it is what an empty player has always meant - so the list
+    draws with no row highlighted rather than with the wrong one.
+
+    At 9.5 this reads `row_a`/`row_b` off the state CHOP and picks the live
+    deck's, which is the same question `player.now_playing` answers inside the
+    engine.
+    """
+    return None
 
 
 def init_table(comp, attribs):

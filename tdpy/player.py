@@ -3,14 +3,21 @@
 Separate from `build.py` on purpose. That module describes a network and runs
 once; this one is called while the network is running.
 
-Every function here is callable from the textport with no arguments:
+**Since 9.4 it runs in the engine's process**, which is where the players are.
+Every function here is still callable with no arguments, from the *engine's*
+textport:
 
     import tdpy.player; tdpy.player.next_clip()
 
 which is the design rule the whole project is held to - advancing is a plain
 function call, and the thing that triggers it is a shim. The panel's buttons
-are one such shim today and a MIDI callback is another at Phase 7. Neither
-knows anything the other does not.
+and the MIDI map are two such shims, and both now reach this module from the
+host by pulsing a parameter: see `tdpy.engine.send`. Neither knows anything the
+other does not, and neither knows it crossed a process to get here.
+
+From the host, the same commands are `tdpy.engine.send("next")`. Called there,
+the functions below report that the player is elsewhere rather than answering
+from an empty container - see `_container`.
 
 **Phase 4c added two more shims and no new way of advancing.** The end-of-file
 watcher calls `on_loop()` and the dwell timer calls `on_dwell()`, and both of
@@ -65,19 +72,32 @@ SEED = None
 
 
 def _container():
-    """The build container, or None with a line saying why.
+    """The container holding the player, or None with a line saying why.
+
+    Inside the engine that is `generated` under the component's top level, which
+    `tdpy.engine.root()` names. In the host there is no player to find and this
+    says so, rather than answering the host's own container - which exists,
+    holds the playlist and MIDI, and would have every lookup below come back
+    empty one operator at a time.
 
     Looked up by path every time rather than held, for the reason in the module
-    docstring: `build()` destroys and recreates it.
+    docstring: the build destroys and recreates it.
     """
-    import td
+    from . import engine
 
-    parent = td.op(build.BUILD_PARENT) or td.op("/")
-    container = parent.op(build.BUILD_ROOT)
+    root = engine.root()
+    if root is None:
+        startup.report(
+            f"[{startup.PACKAGE}] the player runs in the engine"
+            " - from the host, call tdpy.engine.send(command)"
+        )
+        return None
+
+    container = root.op(build.BUILD_ROOT)
     if container is None:
         startup.report(
-            f"[{startup.PACKAGE}] no {build.BUILD_ROOT} under {parent.path}"
-            " - has the build run?"
+            f"[{startup.PACKAGE}] no {build.BUILD_ROOT} under {root.path}"
+            " - has the component built?"
         )
     return container
 
@@ -463,9 +483,13 @@ def set_seed(seed):
 
         import tdpy.player; tdpy.player.set_seed(419273)
 
-    Redraws the list, because the order it shows has changed while the clip it
-    is showing has not - see `shuffle` for why that redraw is a push where the
-    highlight is a pull.
+    It redrew the clip list until 9.4 - the one place in this project a display
+    was pushed to rather than deriving what it shows, because a reshuffle moves
+    every row while the player's `file` stays exactly where it was, and nothing
+    in TouchDesigner watches a Python global. The list is in the host now and
+    the seed is here, so what crosses at 9.5 is the number itself, on the state
+    output's `seed` channel: the host derives the order from `deck(count, seed)`
+    and the push becomes a reading, which is the better shape of the same thing.
     """
     global SEED
 
@@ -474,7 +498,6 @@ def set_seed(seed):
         f"[{startup.PACKAGE}] deck order: "
         + ("playlist order" if SEED is None else f"seed {SEED}")
     )
-    _redraw()
     return SEED
 
 
@@ -674,15 +697,12 @@ def _begin_fade(container, state, incoming):
     startup.set_par(state, "const0value", _cross_value(container, incoming))
     startup.set_par(state, "const1value", float(incoming))
 
-    # The one place the fade's target changes, so the one place the lamps that
-    # report which deck is live have to be asked to look again. Nothing watches
-    # a Constant CHOP's parameters the way the Parameter Execute DATs watch
-    # `play` and `file`, and the file watcher fires a line *above* this one -
-    # early enough to read the target that is being replaced.
-    from . import midi
-
-    midi.refresh_lights()
-
+    # This is where the controller's lamps were refreshed until 9.4 - the one
+    # place the fade's target changes, and so the one place the lights saying
+    # which deck is live had to be asked to look again. The lamps are on the
+    # host's cable and this runs in the engine, so the push is gone rather than
+    # moved: at 9.5 the host watches the `live` channel on the state output,
+    # which is this same number crossing as a reading rather than as a call.
     if seconds <= 0:
         on_fade_done()
         return 0.0
@@ -1002,24 +1022,6 @@ def refresh_dwell():
             + (f"running, {dwell:g}s" if running else "off")
         )
     return timer
-
-
-def _redraw():
-    """Ask the clip list to rebuild its rows, if there is one.
-
-    The one place the display is *pushed* rather than deriving what it shows,
-    and the distinction is worth being exact about. The **highlight** is
-    pulled: it follows the player's `file`, which many things change, so
-    nothing has to remember to redraw it. The **order** has exactly one thing
-    that changes it - this module's seed - and nothing in TouchDesigner is
-    watching a Python global, so that one caller says so explicitly.
-
-    Imported here rather than at module scope because `lister` imports this
-    module, and two module-scope imports of each other is a cycle.
-    """
-    from . import lister
-
-    lister.reset()
 
 
 #: What the panel's buttons are wired to. The keys are operator names, because

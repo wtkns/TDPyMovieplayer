@@ -455,3 +455,76 @@ class TestReopenWindows:
         assert callback.index("tdpy.startup.reload()") < callback.index(
             "build.reopen_windows()"
         )
+
+
+class FakeNetwork:
+    """A container of named operators, and nothing else a lookup needs."""
+
+    def __init__(self, path, children=None):
+        self.path = path
+        self.children = dict(children or {})
+
+    def op(self, name):
+        return self.children.get(name)
+
+
+def _built_container(audio=True):
+    """The engine's container as `build_player` leaves it.
+
+    Named from the module's own constants rather than spelled again, because
+    the point of these tests is which operator each output carries - not
+    whether the mixer's nodes are called what this file says they are.
+    """
+    mixer = FakeNetwork(
+        "/engineSource/generated/audio",
+        {
+            build.AUDIO_MIX_CHOP: FakeNetwork("/engineSource/generated/audio/mix"),
+            "audioA": FakeNetwork("/engineSource/generated/audio/audioA"),
+            "audioB": FakeNetwork("/engineSource/generated/audio/audioB"),
+        },
+    )
+    children = {
+        build.OUT_TOP: FakeNetwork("/engineSource/generated/out"),
+        build.PLAYER_TOPS[0]: FakeNetwork("/engineSource/generated/playerA"),
+        build.PLAYER_TOPS[1]: FakeNetwork("/engineSource/generated/playerB"),
+    }
+    if audio:
+        children[build.AUDIO_COMP] = mixer
+    return FakeNetwork("/engineSource/generated", children)
+
+
+class TestEngineSources:
+    """Which operator inside the engine each output carries."""
+
+    def test_the_program_pair_is_taken_after_the_blend(self):
+        sources = build.engine_sources(_built_container())
+        assert sources["program_video"].path.endswith("/out")
+        assert sources["program_audio"].path.endswith("/audio/mix")
+
+    def test_a_deck_is_taken_before_it(self):
+        # Deck video is the player's own picture, so deck audio is the clip's
+        # own stereo off the Audio Movie CHOP - no level, pan or fade share.
+        # Taking the mixer's strip instead would hand the host a deck that
+        # silences itself whenever the other one is on screen.
+        sources = build.engine_sources(_built_container())
+        assert sources["deck_a_video"].path.endswith("/playerA")
+        assert sources["deck_b_video"].path.endswith("/playerB")
+        assert sources["deck_a_audio"].path.endswith("/audio/audioA")
+        assert sources["deck_b_audio"].path.endswith("/audio/audioB")
+
+    def test_every_declared_output_has_something_to_carry(self):
+        from tdpy import link
+
+        sources = build.engine_sources(_built_container())
+        assert [
+            item.name for item in link.declared() if sources.get(item.name) is None
+        ] == []
+
+    def test_a_mixer_that_was_never_built_answers_none_rather_than_raising(self):
+        # `engine.main` turns this into a LookupError naming the output, which
+        # reaches the host as the Engine COMP's error. Raising here would name
+        # the AttributeError instead.
+        sources = build.engine_sources(_built_container(audio=False))
+        assert sources["program_audio"] is None
+        assert sources["deck_a_audio"] is None
+        assert sources["program_video"] is not None

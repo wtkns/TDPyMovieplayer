@@ -183,3 +183,51 @@ class TestAttributes:
                     "normMin",
                     "normMax",
                 }
+
+
+class FakeOp:
+    def __init__(self, path, children=None):
+        self.path = path
+        self.children = dict(children or {})
+
+    def op(self, name):
+        return self.children.get(name)
+
+
+class TestWhichCompCarriesTheSettings:
+    """The same five values exist in two processes, on two different COMPs."""
+
+    @pytest.fixture
+    def host(self, monkeypatch):
+        """A host: `/project1` holding the settings COMP beside the container."""
+        import types
+
+        from tdpy import build, engine
+
+        configuration = FakeOp("/project1/settings")
+        parent = FakeOp(
+            "/project1",
+            {
+                build.SETTINGS_COMP: configuration,
+                build.BUILD_ROOT: FakeOp("/project1/generated"),
+            },
+        )
+        module = types.ModuleType("td")
+        module.op = lambda path: parent if path == build.BUILD_PARENT else None
+        monkeypatch.setitem(sys.modules, "td", module)
+        monkeypatch.setattr(engine, "ROOT", None)
+        return configuration
+
+    def test_in_the_host_it_is_the_comp_beside_the_build_container(self, host):
+        assert settings.comp() is host
+
+    def test_in_the_engine_it_is_the_components_own_top_level(self, host, monkeypatch):
+        # The .tox's top level carries the settings as custom parameters, which
+        # the host fills by expression - so `value()` reads the same numbers in
+        # both processes without either half knowing which one it is in.
+        from tdpy import engine
+
+        root = FakeOp("/engineSource")
+        monkeypatch.setattr(engine, "root", lambda: root)
+        assert settings.comp() is root
+        assert settings.comp() is not host
