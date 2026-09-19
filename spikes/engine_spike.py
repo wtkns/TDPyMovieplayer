@@ -39,6 +39,7 @@ which reports the real tokens if a label is wrong.
 
 import os
 import pathlib
+import time
 
 from tdpy import startup
 
@@ -126,9 +127,20 @@ def onCreate():
     return
 
 
+SEEN = {}
+
+
 def onFrameStart(frame):
     top = me.parent()
-    if top.par.Stall.eval():
+    stall = top.par.Stall.eval()
+    # Once on the first frame, and again whenever the value changes. Silence
+    # here means the callback does not fire inside a TouchEngine component;
+    # a line reading Stall = 0 after the host has written 1 means the write
+    # does not cross. Without it, both look identical from the host.
+    if SEEN.get("stall") != stall:
+        SEEN["stall"] = stall
+        _log(f"onFrameStart frame {frame}: Stall = {stall!r}")
+    if stall:
         time.sleep(top.par.Stallms.eval() / 1000.0)
     return
 '''
@@ -181,7 +193,12 @@ def _build_source(parent, td):
         ("toggle", "Stall", {"default": False}),
         ("float", "Stallms", {"default": 100.0, "min": 0.0, "normMax": 500.0}),
     ):
-        startup.custom_par(source, "Spike", kind, name, **attributes)
+        par, created = startup.custom_par(source, "Spike", kind, name, **attributes)
+        # `default` is an attribute, not a value: Stallms sat at 0 with a
+        # default of 100 and the stall slept for nothing. custom_par refuses
+        # `val` and hands back `created` so the caller seeds it.
+        if created and "default" in attributes:
+            par.val = attributes["default"]
 
     state = startup.create(source, td.constantCHOP, "state_values")
     state.seq.const.numBlocks = max(state.seq.const.numBlocks, len(STATE_CHANNELS))
@@ -327,6 +344,55 @@ def status():
         else "  state    (no tap - run tap() after component_loaded)"
     )
     startup.report("\n".join(lines))
+
+
+#: The last `rate()` sample, as (host perf_counter, engine_frame).
+_RATE = {}
+
+
+def rate():
+    """The engine's real frame rate, measured between this call and the last.
+
+    `engine_fps` off the Info CHOP read 58 while the engine was demonstrably
+    running flat out, so it is not trustworthy as a rate. This counts the
+    engine's own `absTime.frame` instead, over an interval it times itself -
+    call it twice with any gap at all and the gap is measured rather than
+    assumed. Nothing depends on the caller counting seconds.
+
+    `perf_counter` rather than `monotonic`: on Windows the latter is
+    GetTickCount64 at 15.625ms, which is a quarter of a frame at 60fps.
+    """
+    import td
+
+    state = td.op(f"{PARENT}/{STATE_TAP}")
+    if state is None:
+        startup.report(f"{TAG} no {STATE_TAP} - run tap() first")
+        return None
+    channel = state["engine_frame"]
+    if channel is None:
+        startup.report(f"{TAG} no engine_frame on {state.path}")
+        return None
+
+    now, frame = time.perf_counter(), channel.eval()
+    previous = _RATE.get("sample")
+    _RATE["sample"] = (now, frame)
+    if previous is None:
+        startup.report(
+            f"{TAG} rate: first sample at engine_frame {frame:.0f}"
+            " - call rate() again whenever you like"
+        )
+        return None
+
+    elapsed, advanced = now - previous[0], frame - previous[1]
+    if elapsed <= 0:
+        startup.report(f"{TAG} rate: no time between samples")
+        return None
+    measured = advanced / elapsed
+    startup.report(
+        f"{TAG} rate: engine advanced {advanced:.0f} frames in {elapsed:.2f}s"
+        f" = {measured:.1f} fps"
+    )
+    return measured
 
 
 def remove():
