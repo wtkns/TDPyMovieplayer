@@ -487,9 +487,10 @@ def set_seed(seed):
     was pushed to rather than deriving what it shows, because a reshuffle moves
     every row while the player's `file` stays exactly where it was, and nothing
     in TouchDesigner watches a Python global. The list is in the host now and
-    the seed is here, so what crosses at 9.5 is the number itself, on the state
-    output's `seed` channel: the host derives the order from `deck(count, seed)`
-    and the push becomes a reading, which is the better shape of the same thing.
+    the seed is here, so what crosses is the number: `publish_state` writes it
+    into the state output and the host derives the order from
+    `deck(count, seed)`. The push is still a push, but it now ends at a channel
+    rather than at a display, and what reads that channel is pulling.
     """
     global SEED
 
@@ -498,6 +499,12 @@ def set_seed(seed):
         f"[{startup.PACKAGE}] deck order: "
         + ("playlist order" if SEED is None else f"seed {SEED}")
     )
+    # The one push left, and the one that cannot be anything else: a seed is a
+    # Python global, and nothing in a network - or on another machine - can
+    # watch one. The host derives the whole order from this number and the
+    # playlist's length, so a reshuffle crosses as one channel rather than as a
+    # list of rows.
+    publish_state()
     return SEED
 
 
@@ -539,24 +546,12 @@ def step_index(order, index, step):
     return order[(order.index(index) + step) % len(order)]
 
 
-def playlist_table():
-    """The playlist DAT, or None - the display reads its rows for their text."""
-    _, table = _ops()
-    return table
-
-
-def now_playing():
-    """(playlist row being shown, number of clips), or (None, 0).
-
-    The display's one question, answered in the one place that knows how to
-    ask it. Read off the player's own `file` every time, so there is no stored
-    index here either - see the module docstring.
-    """
-    player, table = _ops()
-    if player is None:
-        return None, 0
-    paths = clip_paths(table)
-    return current_index(paths, str(player.par.file.val)), len(paths)
+#: `playlist_table()` and `now_playing()` stood here until 9.5. They were the
+#: clip list's two questions, asked of this module from the same process; the
+#: list is in the host now and asks them of the state output instead - the
+#: table arrives as a DAT and the row as a channel `publish_state` writes.
+#: Deleted rather than kept: a function nothing calls still reads as the way
+#: the display works.
 
 
 def _step(step, into=None):
@@ -1022,6 +1017,53 @@ def refresh_dwell():
             + (f"running, {dwell:g}s" if running else "off")
         )
     return timer
+
+
+def publish_state():
+    """Write the state channels nothing can compute. Returns what it wrote.
+
+    Three of the twelve: the seed, which is a Python global that no network can
+    watch, and each deck's playlist row, which is a lookup over the table rather
+    than a value sitting on an operator. The other nine are expressions on the
+    same Constant CHOP - see `build.state_expressions` - and this must never
+    write one of those, which is why the channels come from `link.PUSHED`
+    rather than from a list here.
+
+    Recomputes all three from scratch every time, for the reason
+    `refresh_dwell` does: it is called from two row watchers, from `set_seed`
+    and once at the end of the build, and a function that set only the half its
+    caller knew about would need each caller to know which half that was.
+
+    A row that is not in the playlist writes ABSENT, which is what a deck with
+    no clip loaded means and what the host draws as no highlight.
+    """
+    from . import link
+
+    container = _container()
+    if container is None:
+        return None
+    state = container.op(build.STATE_CHOP)
+    if state is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {build.STATE_CHOP} in {container.path}"
+            " - the host cannot see what the player is doing"
+        )
+        return None
+
+    players = _players(container)
+    paths = clip_paths(container.op(build.PLAYLIST_DAT))
+    written = {"seed": link.to_channel(SEED)}
+    for index, channel in enumerate(link.DECK_ROW):
+        row = None
+        if index < len(players):
+            row = current_index(paths, str(players[index].par.file.val))
+        written[channel] = link.to_channel(row)
+
+    for channel, value in written.items():
+        startup.set_par(
+            state, f"const{link.channel_index(channel)}value", value
+        )
+    return written
 
 
 #: What the panel's buttons are wired to. The keys are operator names, because

@@ -603,45 +603,46 @@ DIAGNOSTICS_COMP = "diagnostics"
 DIAGNOSTICS_HEIGHT = 90
 DIAGNOSTICS_FONT_SIZE = 20
 
-#: Channel, label, and how many decimals to draw. Kept as one table so adding a
-#: reading is a row here and nothing else - the same shape as CONTROL_BUTTONS
-#: and settings.SETTINGS.
+#: Label and decimals for the two readings that cross, keyed by which `link`
+#: channel pair they come from. A deck's own channel name is taken from that
+#: pair by index, so this table says what a reading is *called on the panel* and
+#: nothing about where it lives.
 #:
-#: `hardware_decode` is first because it is the one that says whether the Nvidia
-#: decoder is being used at all; its help notes it "does nothing for Hap and
-#: NotchLC codecs, which are always hardware decoded", so on this project's
-#: H.264 media a 0 here is a real finding rather than a formality.
-DIAGNOSTIC_CHANNELS = (
-    ("hardware_decode", "hw", 0),
-    ("pre_read_misses", "miss", 0),
-    ("num_pre_read_frames", "buf", 0),
-    ("last_frame_decode_time", "dec", 1),
-    ("last_gpu_upload_time", "gpu", 1),
-    ("has_decode_errors", "err", 0),
+#: **Four readings were dropped here, and they are not lost.** The strip drew
+#: `hardware_decode`, `last_frame_decode_time`, `last_gpu_upload_time` and
+#: `has_decode_errors` off each player's Info CHOP while the players were in
+#: this process. Those channels still exist, on the Info CHOPs inside the
+#: engine; what does not exist is a way for the host to read them, since
+#: `link.STATE_CHANNELS` carries only these two across. Adding one back means
+#: adding a channel there and a block to the engine's state CHOP.
+#:
+#: `pre_read_misses` is the one that answers the question the strip was built
+#: for. The read-ahead failing to keep up is precisely what a random cue into
+#: the middle of a long GOP causes, and it counts the event rather than its
+#: symptom.
+DIAGNOSTIC_READINGS = (
+    ("DECK_MISSES", "miss", 0),
+    ("DECK_BUFFER", "buf", 0),
 )
 
 
-def _diagnostics_expression(label, info_path):
-    """The Text COMP `text` expression for one player. Returns the string.
-
-    **Nothing calls this at 9.4** - see `_add_diagnostics`, whose row is empty
-    while the players are in the engine. It is kept rather than deleted because
-    what comes back at 9.5 is this same shape against a different CHOP: a path
-    baked in at build time, the channels named inside the expression, and
-    `.eval()` on each. The channel table below is the expensive half of it and
-    is what the 9.0 baseline was read from.
+def _diagnostics_expression(label, chop_path, index):
+    """The Text COMP `text` expression for one deck. Returns the string.
 
     **The channels are named in the expression rather than read by a function
     it calls**, and that is not a style preference. TouchDesigner tracks a
     parameter expression's dependencies by what the expression references, so a
-    tidier `tdpy.player.diagnostics()` reading the same CHOPs inside itself
-    would leave the readout to cook whenever it felt like it - which for a
-    diagnostic is worse than not having one, because a stale number reads as a
-    measurement.
+    tidier `tdpy.engine.state()` reading the same channels inside itself would
+    leave the readout to cook whenever it felt like it - which for a diagnostic
+    is worse than not having one, because a stale number reads as a
+    measurement. It is also why the strip needs no watcher while the clip list
+    does: an expression is pulled, and a List COMP's rows are painted.
 
     An f-string, because a parameter expression is an ordinary Python
-    expression. The path is baked in at build time from the Info CHOP's real
-    `path`, so nothing here depends on where the network was built.
+    expression. The path is baked in at build time from the Null's real `path`,
+    so nothing here depends on where the network was built - and since that
+    Null is the one `engine.output` finds, a player on another machine changes
+    nothing about this.
 
     **`.eval()` is not decoration.** `op(chop)['channel']` answers a
     `td.Channel`, not a number, and formatting one raises *"unsupported format
@@ -650,9 +651,11 @@ def _diagnostics_expression(label, info_path):
     `eval(index) -> float`, evaluating "at the current index based on the
     current time" when given no argument, and that is the number wanted here.
     """
+    from . import link
+
     parts = " ".join(
-        f"{name} {{op({info_path!r})[{channel!r}].eval():.{places}f}}"
-        for channel, name, places in DIAGNOSTIC_CHANNELS
+        f"{name} {{op({chop_path!r})[{getattr(link, pair)[index]!r}].eval():.{places}f}}"
+        for pair, name, places in DIAGNOSTIC_READINGS
     )
     return f'f"{label}  {parts}"'
 
@@ -872,6 +875,41 @@ def onValueChange(par, prev):
 '''
 
 
+#: The Constant CHOP the engine publishes its state through, and the Parameter
+#: Execute DATs that keep the two row channels true.
+#:
+#: **Most of it is expressions, and three channels are written.** A channel that
+#: is a reading of an operator - which deck the cross is settling on, whether a
+#: player is playing, what its decoder is doing - is an expression naming that
+#: operator, so TouchDesigner cooks it when the thing it reports changes. That
+#: is the same rule the Cross TOP's value and the mixer's gains are built on,
+#: and the diagnostics strip is where the cost of breaking it was learned: a
+#: channel computed inside a Python function would cook when it felt like it,
+#: and a stale number does not look broken.
+#:
+#: `link.PUSHED` is the rest - the seed, which is a Python global that nothing
+#: in a network can watch, and the two row numbers, which are a lookup over the
+#: playlist table rather than a value sitting on an operator. Those three are
+#: written by `player.publish_state()`.
+STATE_CHOP = "state"
+STATE_EXEC_NAMES = ("stateA_exec", "stateB_exec")
+STATE_WATCH_PAR = "file"
+
+#: The rows follow each player's `file`, which is the parameter the host's clip
+#: list used to watch from the other side of the boundary. Same trigger, same
+#: fact, one process over - what changed is that it writes a number into a
+#: channel instead of repainting a list.
+STATE_EXEC_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
+
+
+def onValueChange(par, prev):
+    import tdpy.player
+
+    tdpy.player.publish_state()
+    return
+'''
+
+
 MIDI_IN_DAT = "midi_in"
 MIDI_OUT_CHOP = "midi_out"
 MIDI_CALLBACK_DAT = "midi_callbacks"
@@ -1008,7 +1046,7 @@ def build():
     # imported from disk. From here they come off the td module instead.
     import td
 
-    from . import lister, link, settings, startup
+    from . import lister, link, midi, settings, startup
 
     parent = td.op(BUILD_PARENT) or td.op("/")
 
@@ -1030,14 +1068,13 @@ def build():
     container = startup.create(parent, td.baseCOMP, BUILD_ROOT)
     container.nodeX, container.nodeY = 0, 0
 
-    # The host's own scan, and the second one in this project until 9.5: the
-    # engine scans `media/` as well, for the clips it actually plays. This one
-    # exists so the clip list has rows to draw, and it goes when the engine's
-    # playlist crosses as a DAT output.
-    table = _place(startup.create(container, td.tableDAT, PLAYLIST_DAT), 0, 0)
-    rows = _fill_playlist(table, td)
+    # **The host does not scan `media/`.** The folder belongs to the process
+    # that plays from it, which sends its table across as an output - so there
+    # is one scan, on the machine holding the files, and the clip list draws
+    # what that machine says it found rather than a second opinion about the
+    # same folder.
 
-    # The table before the listener that reads it: the MIDI In DAT hears
+    # The device table before the listener that reads it: the MIDI In DAT hears
     # nothing without a device mapping, and this is where one comes from.
     _ensure_device_table(td)
     _add_midi(container, td)
@@ -1058,12 +1095,20 @@ def build():
     else:
         _add_video_window(parent, picture, td)
 
-    panel = _add_control_panel(parent, rows, configuration, td)
+    panel = _add_control_panel(parent, configuration, td)
     _add_control_window(parent, panel, td)
+    # After the panel, because they call into it - and in the container, so a
+    # rebuild replaces them rather than leaving two watchers on one channel.
+    _add_state_watch(container, parent, td)
 
-    # After the panel exists, so the list has its rows on the first frame
-    # rather than on the first clip change.
-    lister.refresh()
+    # After the panel exists, so the list has whatever the engine has already
+    # sent rather than waiting for the next change. On a first launch that is
+    # nothing, and the playlist watcher fills it in when the table arrives.
+    lister.resize()
+
+    # A launch is not a change, so no watcher fires and the controller's LEDs
+    # would sit at whatever the device powered up with until the first cut.
+    midi.refresh_lights()
 
     return container
 
@@ -1103,6 +1148,9 @@ def build_player(root):
     # are built inside `_add_player`.
     _add_audio(container, players, root, td)
     _add_commands(container, root, td)
+    # Last of the network, because every computed channel on it names something
+    # built above - the players, the fade, the Info CHOPs.
+    _add_state(container, td)
 
     # The dwell's watchers only fire when a parameter *changes*, and a load is
     # not a change - so the timer would sit running with whatever Play it was
@@ -1110,7 +1158,103 @@ def build_player(root):
     # the same function they ask is how the state is right on the first frame,
     # and there is only one place that decides it either way.
     player.refresh_dwell()
+    # Same reasoning as the dwell, for the three channels nothing computes: the
+    # row watchers fire on a change and a load is not one, so the rows and the
+    # seed would sit at ABSENT until the first cut.
+    player.publish_state()
     return container
+
+
+def state_expressions(container_path=""):
+    """The expression for each computed state channel, keyed by channel name.
+
+    Pure, so the arithmetic the host reads its surfaces off can be checked
+    without a network. `container_path` is prefixed onto every operator name,
+    empty for a sibling of the state CHOP - the same shape `CROSS_EXPR_TEMPLATE`
+    takes, and for the same reason: the mixer needed the fade's arithmetic from
+    one level down, and a second spelling of it could disagree.
+
+    **The fade's three channels are derived here the way `player` derives them**,
+    and from the same two numbers: `live` is which end the cross is settling on,
+    `fading` is the two ends differing by more than a step of 8-bit blend, and
+    `cross` is the ramp between them - `CROSS_EXPR` itself rather than a reading
+    of the Cross TOP's parameter, which is a frame stale. `FADE_SETTLED` is read
+    off `player` rather than written again, since a tolerance spelled twice is
+    two tolerances.
+    """
+    from . import link, player
+
+    fade = f"op('{container_path}{FADE_STATE_CHOP}')"
+    start = f"{fade}['{FADE_START_CHANNEL}']"
+    target = f"{fade}['{FADE_TARGET_CHANNEL}']"
+
+    expressions = {
+        "live": f"1 if {target} >= 0.5 else 0",
+        "fading": f"1 if abs({target} - {start}) > {player.FADE_SETTLED!r} else 0",
+        "cross": CROSS_EXPR_TEMPLATE.format(prefix=container_path),
+    }
+    for index, name in enumerate(PLAYER_TOPS):
+        info = f"op('{container_path}{PLAYER_INFO_CHOPS[index]}')"
+        expressions[link.DECK_PLAYING[index]] = (
+            f"1 if op('{container_path}{name}').par.play.eval() else 0"
+        )
+        expressions[link.DECK_MISSES[index]] = f"{info}['pre_read_misses']"
+        expressions[link.DECK_BUFFER[index]] = f"{info}['num_pre_read_frames']"
+    return expressions
+
+
+def _add_state(container, td):
+    """The Constant CHOP carrying every state channel. Returns it.
+
+    One block per name in `link.STATE_CHANNELS`, in that order, because the
+    engine writes the pushed three by index and the host reads all twelve by
+    name. Built after the players, the fade and the Info CHOPs, since every
+    computed channel names one of them and an expression written against an
+    operator that does not exist yet keeps the error afterwards.
+    """
+    from . import link, startup
+
+    state = _place(startup.create(container, td.constantCHOP, STATE_CHOP), 500, -900)
+    # The Constant CHOP ships with fewer blocks than this needs. `seq.const` is
+    # the sequence of them, and `numBlocks` was seen taking a new length in
+    # spikes/engine_spike.py on 2026-09-14.
+    state.seq.const.numBlocks = max(state.seq.const.numBlocks, len(link.STATE_CHANNELS))
+
+    expressions = state_expressions()
+    for index, channel in enumerate(link.STATE_CHANNELS):
+        startup.set_par(state, f"const{index}name", channel)
+        expression = expressions.get(channel)
+        if expression is None:
+            # A pushed channel starts absent rather than at 0, which is a real
+            # row and a real seed. `player.publish_state` writes the truth a
+            # moment later, at the end of the build.
+            startup.set_par(state, f"const{index}value", link.ABSENT)
+            continue
+        _set_expression(getattr(state.par, f"const{index}value"), expression, startup)
+
+    for index, (name, exec_name) in enumerate(zip(PLAYER_TOPS, STATE_EXEC_NAMES)):
+        player_top = container.op(name)
+        if player_top is None:
+            continue
+        executor = _place(
+            startup.create(container, td.parameterexecuteDAT, exec_name),
+            750, -900 - index * 150,
+        )
+        executor.text = STATE_EXEC_CALLBACK
+        startup.set_par(executor, "op", player_top.path)
+        startup.set_par(executor, "pars", STATE_WATCH_PAR)
+        # `file` is built in, and a DAT watching only the custom parameters
+        # would sit there looking correctly configured and never fire.
+        startup.set_par(executor, "builtin", True)
+        startup.set_par(executor, "custom", False)
+        startup.set_par(executor, "valuechange", True)
+        startup.set_par(executor, "active", True)
+
+    startup.report(
+        f"[{startup.PACKAGE}] state at {state.path}: {len(link.STATE_CHANNELS)}"
+        f" channels, {', '.join(link.PUSHED)} written"
+    )
+    return state
 
 
 def _add_commands(container, root, td):
@@ -1166,6 +1310,11 @@ def engine_sources(container):
     sources = {
         "program_video": container.op(OUT_TOP),
         "program_audio": None if audio is None else audio.op(AUDIO_MIX_CHOP),
+        # The playlist the engine actually plays from, rather than a second
+        # scan of the same folder in the host - which is the whole point of it
+        # crossing, and why the host no longer opens `media/` at all.
+        "playlist": container.op(PLAYLIST_DAT),
+        "state": container.op(STATE_CHOP),
     }
     for index, name in enumerate(PLAYER_TOPS):
         sources[link.DECK_VIDEO[index]] = container.op(name)
@@ -1682,7 +1831,127 @@ def _slider_width(page=None):
     return max(_panel_width() - fixed - gaps, 0) // count
 
 
-def _add_control_panel(parent, clips, configuration, td):
+#: The host's watchers on what the engine publishes: one CHOP Execute per state
+#: channel that a surface draws from, and one DAT Execute on the playlist.
+#:
+#: **One DAT per channel, because the parameter is singular.** The CHOP Execute
+#: DAT's help calls its Channel parameter "Which channel will trigger change",
+#: and gives no syntax for naming several - so a space-separated list would be a
+#: guess that looked like configuration. This is the same shape the dwell's
+#: three watchers already take: several DATs, one callback, which recomputes
+#: from scratch and therefore does not care which of them fired.
+#:
+#: **Only the channels a surface draws from.** `misses_*` and `buffer_*` are on
+#: the same output and change constantly; they are read by expressions on the
+#: diagnostics strip, which needs no callback at all. Watching them here would
+#: repaint the clip list every frame.
+STATE_WATCH_EXEC_PREFIX = "state_"
+STATE_WATCH_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
+
+
+def onValueChange(channel, sampleIndex, val, prev):
+    import tdpy.lister
+    import tdpy.midi
+
+    tdpy.lister.refresh()
+    tdpy.midi.refresh_lights()
+    return
+'''
+
+#: The playlist's watcher. The table arrives after the panel is built - the
+#: engine has a folder to scan and files to measure first - and it changes again
+#: whenever that scan does, so the list's row count cannot be set once at build
+#: time the way it was when the host did its own scanning.
+#:
+#: `onTableChange(dat, prevDAT, info)` is the signature from the install's
+#: `bin/Lib/tdutils/DATScripts/datexecuteDAT.py`.
+PLAYLIST_EXEC_NAME = "playlist_exec"
+PLAYLIST_EXEC_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
+
+
+def onTableChange(dat, prevDAT, info):
+    import tdpy.lister
+
+    tdpy.lister.resize()
+    return
+'''
+
+
+def state_watch_channels():
+    """Which state channels the host's surfaces are redrawn by.
+
+    The union of what the clip list and the lamps read: which deck is live,
+    each deck's row, the seed the order is dealt from, and each deck's
+    transport. Derived from `link` rather than listed, so a channel renamed
+    there is renamed here.
+    """
+    from . import link
+
+    return ("live", "seed") + link.DECK_ROW + link.DECK_PLAYING
+
+
+def _add_state_watch(container, parent, td):
+    """A watcher per state channel, and one on the playlist. Returns them.
+
+    Both read through the Nulls beside the container rather than through the
+    Engine COMP, for the reason `engine.output` exists: what the host draws
+    should not know which machine the player is on.
+    """
+    from . import link, startup
+
+    made = []
+    state = parent.op(link.output("state").name)
+    if state is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {link.output('state').name} under"
+            f" {parent.path} - the clip list and the lamps will not follow the player"
+        )
+    else:
+        for index, channel in enumerate(state_watch_channels()):
+            watcher = _place(
+                startup.create(
+                    container, td.chopexecuteDAT, STATE_WATCH_EXEC_PREFIX + channel
+                ),
+                500, -200 - index * 100,
+            )
+            watcher.text = STATE_WATCH_CALLBACK
+            startup.set_par(watcher, "chop", state.path)
+            startup.set_par(watcher, "channel", channel)
+            # The value changing is the whole trigger. Every other condition is
+            # turned off explicitly, because a second one firing would repaint
+            # the list twice per cut and the symptom is a panel that stutters.
+            startup.set_par(watcher, "valuechange", True)
+            startup.set_par(watcher, "offtoon", False)
+            startup.set_par(watcher, "whileon", False)
+            startup.set_par(watcher, "ontooff", False)
+            startup.set_par(watcher, "whileoff", False)
+            startup.set_par(watcher, "active", True)
+            made.append(watcher)
+
+    playlist = parent.op(link.output("playlist").name)
+    if playlist is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {link.output('playlist').name} under"
+            f" {parent.path} - the clip list will stay empty"
+        )
+    else:
+        watcher = _place(
+            startup.create(container, td.datexecuteDAT, PLAYLIST_EXEC_NAME), 500, -100
+        )
+        watcher.text = PLAYLIST_EXEC_CALLBACK
+        startup.set_par(watcher, "dat", playlist.path)
+        startup.set_par(watcher, "tablechange", True)
+        startup.set_par(watcher, "active", True)
+        made.append(watcher)
+
+    startup.report(
+        f"[{startup.PACKAGE}] watching {', '.join(state_watch_channels())}"
+        f" and the playlist, {len(made)} watcher(s)"
+    )
+    return made
+
+
+def _add_control_panel(parent, configuration, td):
     """The panel: transport, the settings band, and the clip list beneath them.
 
     Destroyed and rebuilt on every build, unlike the window that shows it - so
@@ -1690,11 +1959,11 @@ def _add_control_panel(parent, clips, configuration, td):
     The window converges onto the new panel because `winop` holds a path, and
     the path does not change when the operator at the end of it does.
 
-    `clips` is the scanned playlist, needed only for its length; `configuration`
-    is the settings COMP the band's controls bind to. It took the build
-    container as well until 9.4, to point the clip list's watchers and the
-    diagnostics readouts at the players - both of which now read operators in
-    the engine's process and are inert until 9.5.
+    `configuration` is the settings COMP the band's controls bind to, and is all
+    this needs now. It took the build container until 9.4, to point the clip
+    list's watchers and the diagnostics readouts at the players, and the scanned
+    playlist until 9.5, for the list's row count - both of those now come from
+    the engine, the first as channels and the second as a table.
     """
     from . import startup
 
@@ -1737,32 +2006,24 @@ def _add_control_panel(parent, clips, configuration, td):
             continue
         _add_settings_row(panel, configuration, page, *band, td)
     _add_parameters(panel, configuration, td)
-    _add_clip_list(panel, clips, td)
+    _add_clip_list(panel, td)
     _add_diagnostics(panel, td)
 
     startup.report(
         f"[{startup.PACKAGE}] control panel at {panel.path}:"
         f" {', '.join(name for name, _ in CONTROL_BUTTONS)}"
-        f" over {len(clips)} clip(s)"
     )
     return panel
 
 
 def _add_diagnostics(panel, td):
-    """The row the decoder readings belong in. **Empty since 9.4.**
+    """A line per deck of what its decoder is doing, read off the state output.
 
-    The readings are Info CHOP channels on the two players, and the players are
-    in the engine's process now - an expression in the host cannot reach them,
-    and there is no honest reading to draw. The row itself stays so the panel
-    keeps its height, which is worth more than it sounds: the window is sized
-    from the panel at the launch that opened it, and a row appearing or
-    disappearing costs a restart to see properly.
-
-    What comes back at 9.5 is the two that cross on the state CHOP -
-    `link.STATE_CHANNELS` carries `misses_*` and `buffer_*`, which is
-    `pre_read_misses` and `num_pre_read_frames`, the pair that answered what the
-    decoder was doing at 9.0. The other four readings below are not on that
-    list and would have to be added to it to come back at all.
+    The readings are the engine's, and they arrive as two channels per deck -
+    `misses_*` and `buffer_*`, which are that player's `pre_read_misses` and
+    `num_pre_read_frames`, derived on the machine that holds the decoder. The
+    strip does not know that: it reads the Null `engine.output` finds, the same
+    as every other surface here.
 
     Built because the stutter at a cut had two plausible causes - a decode that
     could not keep up, or the desktop compositor dropping frames outside a
@@ -1780,7 +2041,7 @@ def _add_diagnostics(panel, td):
     states at any moment and averaging them would hide the case that matters:
     the hidden player opening a new file while the visible one plays.
     """
-    from . import startup
+    from . import engine, link, startup
 
     row = startup.create(panel, td.containerCOMP, DIAGNOSTICS_COMP)
     row.nodeX, row.nodeY = 0, -900
@@ -1794,9 +2055,33 @@ def _add_diagnostics(panel, td):
     # above from silently reshuffling the panel.
     startup.set_par(row, "alignorder", _row_order("diagnostics"))
 
+    state = engine.output(link.output("state").name)
+    if state is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {link.output('state').name} to read"
+            f" - {row.path} will be empty"
+        )
+        return row
+
+    width = max(
+        (_panel_width() - PANEL_SPACING * (len(PLAYER_TOPS) - 1)) // len(PLAYER_TOPS),
+        0,
+    )
+    mode = startup.td_enum("ParMode")
+    for index, name in enumerate(PLAYER_TOPS):
+        readout = startup.create(row, td.textCOMP, f"{DIAGNOSTICS_COMP}_{name}")
+        readout.nodeX, readout.nodeY = index * 200, -900
+        startup.set_par(readout, "w", width)
+        startup.set_par(readout, "h", DIAGNOSTICS_HEIGHT)
+        startup.set_par(readout, "fontsize", DIAGNOSTICS_FONT_SIZE)
+        startup.set_par(readout, "alignorder", index)
+        if mode is not None:
+            readout.par.text.expr = _diagnostics_expression(name, state.path, index)
+            readout.par.text.mode = mode.EXPRESSION
+
     startup.report(
-        f"[{startup.PACKAGE}] diagnostics at {row.path} are empty until the state"
-        f" CHOP crosses - {', '.join(PLAYER_INFO_CHOPS)} are in the engine"
+        f"[{startup.PACKAGE}] diagnostics at {row.path} <- {state.path}: "
+        + ", ".join(name for _, name, _ in DIAGNOSTIC_READINGS)
     )
     return row
 
@@ -1986,19 +2271,19 @@ def _add_parameters(panel, configuration, td):
     return node
 
 
-def _add_clip_list(panel, rows, td):
+def _add_clip_list(panel, td):
     """The list of clips. Returns it.
 
-    Rows is the playlist plus one for the header; columns come from
-    `lister.COLUMNS`, so a column added there needs nothing changed here. The
-    list draws nothing until its init callbacks have run, which is what the
-    Reset pulse at the end is for - creating the node and setting Rows does
-    not itself fill anything in.
+    Columns come from `lister.COLUMNS`, so a column added there needs nothing
+    changed here. The list draws nothing until its init callbacks have run,
+    which is what `lister.resize()` is for - creating the node does not itself
+    fill anything in.
 
-    **Without its highlight since 9.4.** It drew which clip was playing by
-    watching both players' `file`, and the players are in another process; the
-    rows it shows come from the host's own scan of `media/` until the engine's
-    playlist crosses at 9.5.
+    **The row count is not set here**, and that is the change 9.5 made. It used
+    to be the length of the host's own scan, known at build time; the table now
+    arrives from the engine after the panel is built and changes again whenever
+    that scan does. So `lister.resize()` sets it from whatever has arrived - at
+    the end of the build, and again from the playlist's watcher.
     """
     from . import lister, startup
 
@@ -2012,9 +2297,8 @@ def _add_clip_list(panel, rows, td):
     startup.set_par(node, "h", CLIP_LIST_HEIGHT)
     startup.set_par(node, "alignorder", _row_order("cliplist"))
     startup.set_par(node, "callbacks", callbacks.path)
-    # One more row than there are clips: row 0 is the header, and locking it
-    # keeps it visible once the list is long enough to scroll.
-    startup.set_par(node, "rows", len(rows) + 1)
+    # Row 0 is the header, and locking it keeps it visible once the list is
+    # long enough to scroll. How many rows follow it is `lister.resize()`'s.
     startup.set_par(node, "cols", len(lister.COLUMNS))
     startup.set_par(node, "lockfirstrow", True)
     startup.set_par(node, "vscrollbar", True)
@@ -2022,7 +2306,6 @@ def _add_clip_list(panel, rows, td):
     # sideways - and a horizontal bar would eat a row's worth of height to
     # say so.
     startup.set_par(node, "hscrollbar", False)
-    pulse(node, "reset")
     return node
 
 

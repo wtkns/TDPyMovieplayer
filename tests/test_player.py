@@ -185,7 +185,17 @@ class TestSeedAndShuffle:
     def test_shuffle_picks_a_seed_and_reports_it(self, silent):
         seed = player.shuffle()
         assert player.SEED == seed
-        assert str(seed) in silent[-1]
+        assert any(str(seed) in line for line in silent)
+
+    def test_a_new_seed_is_published_for_the_host_to_deal_from(self, monkeypatch):
+        # The one push left in this module. Without it a reshuffle changes the
+        # order the engine plays and nothing else, and the host's list goes on
+        # showing the deck it was dealt last time.
+        published = []
+        monkeypatch.setattr(player, "publish_state", lambda: published.append(True))
+        monkeypatch.setattr(startup, "report", lambda line: None)
+        player.set_seed(31337)
+        assert published == [True]
 
     def test_shuffle_actually_changes_the_order(self, silent):
         player.shuffle()
@@ -847,3 +857,103 @@ class TestWhereThePlayerIs:
         monkeypatch.setattr(engine, "root", lambda: FakeRoot("/engineSource"))
         assert player._container() is None
         assert "has the component built?" in silent[0]
+
+
+class FakeStateChop:
+    """A Constant CHOP's value parameters, by block index."""
+
+    path = "/engineSource/generated/state"
+
+    def __init__(self):
+        self.par = FakeStatePars()
+
+
+class FakeStatePars:
+    def __init__(self):
+        self.written = {}
+
+    def __getattr__(self, name):
+        parameter = FakeValuePar(self, name)
+        object.__setattr__(self, name, parameter)
+        return parameter
+
+
+class FakeValuePar:
+    def __init__(self, pars, name):
+        object.__setattr__(self, "_pars", pars)
+        object.__setattr__(self, "_name", name)
+
+    def __setattr__(self, attribute, value):
+        if attribute == "val":
+            self._pars.written[self._name] = value
+
+
+class TestPublishState:
+    """The three channels the engine writes, since nothing can compute them."""
+
+    @pytest.fixture
+    def published(self, monkeypatch):
+        from tdpy import build
+
+        state = FakeStateChop()
+        table = FakeTable({"path": ["path", "one.mov", "two.mov", "three.mov"]})
+        players = [
+            FakeOp("/engineSource/generated/playerA"),
+            FakeOp("/engineSource/generated/playerB"),
+        ]
+        players[0].par.file = Cell("two.mov")
+        players[1].par.file = Cell("three.mov")
+
+        container = FakeRoot("/engineSource/generated", {
+            build.STATE_CHOP: state, build.PLAYLIST_DAT: table,
+        })
+        monkeypatch.setattr(player, "_container", lambda: container)
+        monkeypatch.setattr(player, "_players", lambda comp: players)
+        return state, players
+
+    def test_it_writes_each_decks_row_and_the_seed(self, published, silent):
+        from tdpy import link
+
+        state, _ = published
+        player.SEED = None
+        written = player.publish_state()
+        assert written == {"seed": -1, "row_a": 1, "row_b": 2}
+        # By block index, which is where the host reads each name from.
+        assert state.par.written == {
+            f"const{link.channel_index('seed')}value": -1,
+            f"const{link.channel_index('row_a')}value": 1,
+            f"const{link.channel_index('row_b')}value": 2,
+        }
+
+    def test_a_clip_that_is_not_in_the_playlist_reads_absent(self, published, silent):
+        from tdpy import link
+
+        _, players = published
+        players[1].par.file = Cell("gone.mov")
+        assert player.publish_state()["row_b"] == link.ABSENT
+
+    def test_the_seed_crosses_as_a_number(self, published, silent):
+        player.SEED = 419273
+        try:
+            assert player.publish_state()["seed"] == 419273
+        finally:
+            player.SEED = None
+
+    def test_it_writes_nothing_else(self, published, silent):
+        # Every other channel is an expression on the same CHOP. Writing one
+        # would replace the expression with a constant, and the reading would
+        # stop moving rather than break.
+        from tdpy import link
+
+        state, _ = published
+        player.publish_state()
+        assert len(state.par.written) == len(link.PUSHED)
+
+    def test_a_component_without_a_state_chop_says_so(self, monkeypatch, silent):
+        from tdpy import build
+
+        monkeypatch.setattr(
+            player, "_container", lambda: FakeRoot("/engineSource/generated")
+        )
+        assert player.publish_state() is None
+        assert build.STATE_CHOP in silent[0]

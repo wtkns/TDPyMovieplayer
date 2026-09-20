@@ -281,32 +281,37 @@ class TestDiagnosticsExpression:
     readout that never worked.
     """
 
-    PATH = "/project1/generated/playerAInfo"
+    PATH = "/project1/state"
 
+    #: The state output as the host receives it. Both decks are on one CHOP
+    #: now, which is why the expression has to pick its own deck's channels -
+    #: a readout reading the other deck's would be a plausible number in the
+    #: wrong column.
     VALUES = {
-        "hardware_decode": 1.0,
-        "pre_read_misses": 3.0,
-        "num_pre_read_frames": 12.0,
-        "last_frame_decode_time": 4.25,
-        "last_gpu_upload_time": 0.5,
-        "has_decode_errors": 0.0,
+        "misses_a": 3.0,
+        "buffer_a": 12.0,
+        "misses_b": 1.0,
+        "buffer_b": 9.0,
     }
 
     def test_it_is_a_valid_python_expression(self):
         # The whole point. compile() in eval mode is the same parse
         # TouchDesigner will do, run somewhere the failure is visible.
-        expression = build._diagnostics_expression("playerA", self.PATH)
+        expression = build._diagnostics_expression("playerA", self.PATH, 0)
         compile(expression, "<expr>", "eval")
 
     def test_it_evaluates_to_the_line_it_promises(self):
         # Evaluated against a stand-in `op` so the formatting is checked rather
         # than assumed - the f-string nesting here is easy to get subtly wrong
         # and impossible to see wrong in a screenshot.
-        expression = build._diagnostics_expression("playerA", self.PATH)
+        expression = build._diagnostics_expression("playerA", self.PATH, 0)
         result = eval(expression, {"op": lambda path: FakeChannels(self.VALUES)})
-        assert result == (
-            "playerA  hw 1 miss 3 buf 12 dec 4.2 gpu 0.5 err 0"
-        )
+        assert result == "playerA  miss 3 buf 12"
+
+    def test_each_deck_reads_its_own_channels(self):
+        expression = build._diagnostics_expression("playerB", self.PATH, 1)
+        result = eval(expression, {"op": lambda path: FakeChannels(self.VALUES)})
+        assert result == "playerB  miss 1 buf 9"
 
     def test_every_channel_is_evaluated_rather_than_formatted_directly(self):
         # The bug this class failed to catch the first time, now the thing it
@@ -319,47 +324,42 @@ class TestDiagnosticsExpression:
         # Asserted on the text rather than by catching an exception: the
         # question is whether every reference goes through Channel.eval(), and
         # one that did not would simply format the object it was given.
-        expression = build._diagnostics_expression("playerA", self.PATH)
-        assert expression.count(".eval():") == len(build.DIAGNOSTIC_CHANNELS)
+        expression = build._diagnostics_expression("playerA", self.PATH, 0)
+        assert expression.count(".eval():") == len(build.DIAGNOSTIC_READINGS)
 
     def test_it_does_not_work_against_plain_numbers(self):
         # The other half of the same point, from the opposite direction: if
         # this ever passes, the expression has stopped requiring the shape the
         # app actually hands it and the fake above has stopped being a fake.
-        expression = build._diagnostics_expression("playerA", self.PATH)
+        expression = build._diagnostics_expression("playerA", self.PATH, 0)
         with pytest.raises(AttributeError):
             eval(expression, {"op": lambda path: self.VALUES})
 
-    def test_it_names_the_info_chop_it_was_given(self):
+    def test_it_names_the_chop_it_was_given(self):
         # The dependency TouchDesigner tracks. If the path stopped appearing in
         # the expression the readout would cook when it felt like it, and a
         # stale diagnostic is worse than none.
-        expression = build._diagnostics_expression("playerB", self.PATH)
-        assert expression.count(self.PATH) == len(build.DIAGNOSTIC_CHANNELS)
+        expression = build._diagnostics_expression("playerB", self.PATH, 1)
+        assert expression.count(self.PATH) == len(build.DIAGNOSTIC_READINGS)
 
-    def test_every_channel_is_named(self):
-        expression = build._diagnostics_expression("playerA", self.PATH)
-        for channel, _, _ in build.DIAGNOSTIC_CHANNELS:
-            assert channel in expression
+    def test_every_reading_is_named(self):
+        from tdpy import link
 
-    def test_the_channels_are_movie_file_in_top_channels(self):
-        # `dropped_frames` is in libTD.dll and belongs to the Video Device Out
-        # TOP, not to this one - it was the obvious name for the symptom and
-        # would have been a channel that is simply not there. The list below is
-        # from Point_File_In_TOP.htm, which enumerates the shared file-reading
-        # channel set that Movie File In TOP's own page gives only in prose.
-        published = {
-            "loop_frame", "pre_read_misses", "last_pre_read_miss_wait",
-            "hard_drive_timeouts", "num_pre_read_frames", "first_index_to_read",
-            "last_frame_hd_read_time", "last_frame_decode_time",
-            "last_gpu_upload_time", "open", "opening", "open_failed",
-            "fully_pre_read", "true_length", "hardware_yuv_to_rgb",
-            "has_non_av_track", "pre_read_fails", "disk_read_mbit_rate",
-            "has_decode_errors", "num_decode_chunks", "hardware_decode",
-        }
-        for channel, _, _ in build.DIAGNOSTIC_CHANNELS:
-            assert channel in published, f"{channel} is not on this operator"
-        assert "dropped_frames" not in published
+        expression = build._diagnostics_expression("playerA", self.PATH, 0)
+        for pair, _, _ in build.DIAGNOSTIC_READINGS:
+            assert getattr(link, pair)[0] in expression
+
+    def test_the_readings_are_channels_the_engine_publishes(self):
+        # They were Movie File In TOP channels read off an Info CHOP until 9.5,
+        # and are the same two numbers - `pre_read_misses` and
+        # `num_pre_read_frames` - now derived where the decoder is and sent
+        # across. A reading naming a channel the state output does not carry
+        # would leave the strip blank, which reads as a player with nothing to
+        # report rather than as a readout pointed at nothing.
+        from tdpy import link
+
+        for pair, _, _ in build.DIAGNOSTIC_READINGS:
+            assert set(getattr(link, pair)) <= set(link.STATE_CHANNELS), pair
 
 
 class FakePulsePar:
@@ -487,6 +487,8 @@ def _built_container(audio=True):
         build.OUT_TOP: FakeNetwork("/engineSource/generated/out"),
         build.PLAYER_TOPS[0]: FakeNetwork("/engineSource/generated/playerA"),
         build.PLAYER_TOPS[1]: FakeNetwork("/engineSource/generated/playerB"),
+        build.PLAYLIST_DAT: FakeNetwork("/engineSource/generated/playlist"),
+        build.STATE_CHOP: FakeNetwork("/engineSource/generated/state"),
     }
     if audio:
         children[build.AUDIO_COMP] = mixer
@@ -528,3 +530,99 @@ class TestEngineSources:
         assert sources["program_audio"] is None
         assert sources["deck_a_audio"] is None
         assert sources["program_video"] is not None
+
+
+class TestStateExpressions:
+    """What the engine computes, as against what it writes.
+
+    Every channel on the state output is one or the other. A channel that were
+    neither would sit at ABSENT for the life of the component and read, from
+    the host, exactly like a player that never did anything.
+    """
+
+    def test_every_channel_is_either_computed_or_written(self):
+        from tdpy import link
+
+        assert set(build.state_expressions()) | set(link.PUSHED) == set(
+            link.STATE_CHANNELS
+        )
+
+    def test_nothing_is_both(self):
+        # An expression on a block that `publish_state` also writes would be
+        # overwritten once and then never recomputed - a reading that stops.
+        from tdpy import link
+
+        assert set(build.state_expressions()).isdisjoint(link.PUSHED)
+
+    def test_each_one_is_an_expression_python_accepts(self):
+        for channel, expression in build.state_expressions().items():
+            compile(expression, f"<{channel}>", "eval")
+
+    def test_the_live_deck_is_read_off_the_fade_rather_than_remembered(self):
+        # The same derivation `player.fade_target` makes, from the same two
+        # numbers. A second way of answering "which deck is showing" is a
+        # second thing that can be wrong about it.
+        expressions = build.state_expressions()
+        assert expressions["live"] == (
+            "1 if op('fadeState')['target'] >= 0.5 else 0"
+        )
+
+    def test_fading_uses_the_tolerance_the_transport_uses(self):
+        # Written from `player.FADE_SETTLED` rather than repeated here: a
+        # tolerance spelled twice is two tolerances, and the host would call a
+        # fade finished a fraction before or after the engine did.
+        from tdpy import player
+
+        assert repr(player.FADE_SETTLED) in build.state_expressions()["fading"]
+
+    def test_the_cross_is_the_arithmetic_and_not_a_reading_of_the_top(self):
+        # `cross.par.cross` is a frame stale, which is the open issue that
+        # makes an interrupted fade jump. The channel carries the same
+        # expression the Cross TOP and the mixer's gains are driven by.
+        assert build.state_expressions()["cross"] == build.CROSS_EXPR
+
+    def test_a_prefix_reaches_the_same_operators_from_one_level_out(self):
+        # The mixer needed the fade's arithmetic from inside its own COMP, and
+        # anything reading these channels from outside the container needs the
+        # same. One template, so the two spellings cannot disagree.
+        prefixed = build.state_expressions("generated/")
+        assert "op('generated/fadeState')" in prefixed["live"]
+
+    def test_each_deck_reads_its_own_player_and_info_chop(self):
+        from tdpy import link
+
+        expressions = build.state_expressions()
+        for index, name in enumerate(build.PLAYER_TOPS):
+            assert name in expressions[link.DECK_PLAYING[index]]
+            assert build.PLAYER_INFO_CHOPS[index] in expressions[link.DECK_MISSES[index]]
+            assert build.PLAYER_INFO_CHOPS[index] in expressions[link.DECK_BUFFER[index]]
+
+    def test_the_decoder_readings_are_the_channels_the_baseline_was_read_from(self):
+        # `pre_read_misses` is the one that answers what the 9.0 baseline
+        # asked. Written as the literal the operator publishes, not as
+        # whatever this project calls it on the panel.
+        from tdpy import link
+
+        expressions = build.state_expressions()
+        assert "pre_read_misses" in expressions[link.DECK_MISSES[0]]
+        assert "num_pre_read_frames" in expressions[link.DECK_BUFFER[0]]
+
+
+class TestStateWatchChannels:
+    def test_the_host_watches_what_its_surfaces_draw_from(self):
+        assert build.state_watch_channels() == (
+            "live", "seed", "row_a", "row_b", "playing_a", "playing_b"
+        )
+
+    def test_the_decoder_readings_are_not_watched(self):
+        # They change constantly and are drawn by expressions, which need no
+        # callback. A watcher on one would repaint the clip list every frame.
+        from tdpy import link
+
+        watched = set(build.state_watch_channels())
+        assert watched.isdisjoint(link.DECK_MISSES + link.DECK_BUFFER)
+
+    def test_every_watched_channel_is_published(self):
+        from tdpy import link
+
+        assert set(build.state_watch_channels()) <= set(link.STATE_CHANNELS)

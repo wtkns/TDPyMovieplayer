@@ -254,11 +254,26 @@ class TestColumnsAgreeWithTheRestOfTheProject:
         fixed = sum(width for _, _, width, _ in lister.COLUMNS)
         assert fixed <= build._panel_width()
 
-    def test_no_row_is_highlighted_while_the_player_is_in_the_engine(self):
-        # The highlight followed each player's `file` through a Parameter
-        # Execute DAT, and at 9.4 the players are in another process. None is
-        # the answer every caller here already handles - `active_row` and
-        # `row_bg` were written for a player with no file loaded - so the
-        # failure this guards against is the opposite one: a host that answers
-        # a row number anyway and lights whatever happens to be there.
+    def test_no_row_is_highlighted_before_the_engine_has_said(self, monkeypatch):
+        # None is the answer every caller here already handles - `active_row`
+        # and `row_bg` were written for a player with no file loaded - and it
+        # is what a channel reads before the component has loaded. The failure
+        # this guards against is the opposite one: a host that answers a row
+        # number anyway and lights whatever happens to be there.
+        from tdpy import engine
+
+        monkeypatch.setattr(engine, "deck_state", lambda channels: None)
         assert lister._active() is None
+
+    def test_the_highlight_is_the_live_decks_row(self, monkeypatch):
+        # Two decks publish a row each and one channel says which is showing.
+        # The row is a playlist index and the list has a header, so what comes
+        # back is one more than the position in the deck's order.
+        from tdpy import engine, link
+
+        monkeypatch.setattr(engine, "deck_state", lambda channels: 2.0)
+        monkeypatch.setattr(
+            lister, "_table_and_order", lambda: (None, [3, 2, 1, 0])
+        )
+        assert lister._active() == 2
+        assert link.DECK_ROW == ("row_a", "row_b")

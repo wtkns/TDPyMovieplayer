@@ -37,7 +37,7 @@ derived from it is testable at a normal prompt.
 
 import collections
 
-from . import engine, player, settings, startup
+from . import engine, link, player, settings, startup
 
 #: The message strings TouchDesigner hands the callback. Spelled as it spells
 #: them: the MIDI In DAT's Message filter documents "Control Change" and the
@@ -241,15 +241,21 @@ def light_states():
     """What each named state currently is, as a dict of name to bool.
 
     The one place the lamps ask the machine anything. Every answer is read
-    rather than remembered - `player.playing_at` is that deck's transport
-    parameter and `player.is_live` is the fade state's target - so a light
-    cannot drift from what it reports, and a rebuild needs nothing restored.
+    rather than remembered - `playing_*` is that deck's transport parameter and
+    `live` is the fade state's target, both derived where the player is and
+    published as channels - so a light cannot drift from what it reports, and a
+    rebuild needs nothing restored.
+
+    A channel the engine has not published yet reads as False, which leaves the
+    lamp dark. That is the honest answer for a player that is not running: the
+    alternative is a light saying a deck is live before there is a deck.
     """
+    live = engine.state("live")
     return {
-        "playing_a": player.playing_at(0),
-        "playing_b": player.playing_at(1),
-        "live_a": player.is_live(0),
-        "live_b": player.is_live(1),
+        "playing_a": bool(engine.state(link.DECK_PLAYING[0])),
+        "playing_b": bool(engine.state(link.DECK_PLAYING[1])),
+        "live_a": live is not None and round(live) == 0,
+        "live_b": live is not None and round(live) == 1,
     }
 
 

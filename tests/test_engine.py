@@ -313,6 +313,64 @@ class TestSend:
         assert "next went nowhere" in silent[0]
 
 
+class FakeChannel:
+    def __init__(self, value):
+        self.value = value
+
+    def eval(self, index=None):
+        return self.value
+
+
+class FakeStateChop:
+    """The host's Null carrying the state output: `[]` by channel name."""
+
+    path = "/project1/state"
+
+    def __init__(self, values):
+        self.values = dict(values)
+
+    def __getitem__(self, name):
+        found = self.values.get(name)
+        return None if found is None else FakeChannel(found)
+
+
+class TestReadingWhatTheEngineSays:
+    """The host's one place that knows where the engine's data arrives."""
+
+    @pytest.fixture
+    def published(self, monkeypatch):
+        chop = FakeStateChop(
+            {"live": 1.0, "row_a": 4.0, "row_b": 7.0, "seed": 419273.0}
+        )
+        monkeypatch.setattr(
+            engine, "output", lambda name: chop if name == "state" else None
+        )
+        return chop
+
+    def test_a_channel_reads_as_a_number(self, published):
+        assert engine.state("seed") == 419273.0
+
+    def test_a_channel_the_engine_does_not_publish_is_none(self, published):
+        # An older .tox, or a name that drifted. None is what every surface
+        # already draws as "nothing to show".
+        assert engine.state("rows") is None
+
+    def test_no_output_yet_is_none_rather_than_an_error(self, monkeypatch):
+        # The first seconds of a launch, every frame. A reported line here
+        # would fill a log kept for launches.
+        monkeypatch.setattr(engine, "output", lambda name: None)
+        assert engine.state("live") is None
+
+    def test_a_per_deck_channel_answers_for_the_deck_that_is_showing(self, published):
+        assert engine.deck_state(link.DECK_ROW) == 7.0
+        published.values["live"] = 0.0
+        assert engine.deck_state(link.DECK_ROW) == 4.0
+
+    def test_a_silent_engine_has_no_live_deck(self, monkeypatch):
+        monkeypatch.setattr(engine, "output", lambda name: FakeStateChop({}))
+        assert engine.deck_state(link.DECK_ROW) is None
+
+
 class TestOnCommand:
     """The engine's end: a pulsed parameter becomes a transport call."""
 
@@ -377,6 +435,10 @@ class FakeSelectCHOP(FakeSelect):
     PARAMETER = "chops"
 
 
+class FakeSelectDAT(FakeSelect):
+    PARAMETER = "dat"
+
+
 class FakeRoot:
     path = "/engineSource"
 
@@ -397,6 +459,7 @@ def fake_td(monkeypatch):
     module = types.ModuleType("td")
     module.selectTOP = FakeSelectTOP
     module.selectCHOP = FakeSelectCHOP
+    module.selectDAT = FakeSelectDAT
     monkeypatch.setitem(sys.modules, "td", module)
     return module
 
@@ -442,7 +505,10 @@ class TestMain:
         engine.main(root)
         video = root.op(engine.SELECT_PREFIX + "program_video")
         audio = root.op(engine.SELECT_PREFIX + "program_audio")
-        assert isinstance(video, FakeSelectTOP) and isinstance(audio, FakeSelectCHOP)
+        table = root.op(engine.SELECT_PREFIX + "playlist")
+        assert isinstance(video, FakeSelectTOP)
+        assert isinstance(audio, FakeSelectCHOP)
+        assert isinstance(table, FakeSelectDAT)
 
     def test_the_root_is_recorded_so_the_player_can_find_its_network(
         self, fake_td, built, silent

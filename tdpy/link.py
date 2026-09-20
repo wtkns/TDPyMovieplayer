@@ -134,13 +134,13 @@ OUTPUTS = (
 DECK_VIDEO = ("deck_a_video", "deck_b_video")
 DECK_AUDIO = ("deck_a_audio", "deck_b_audio")
 
-#: The outputs the generated `.tox` carries today: the program pair and both
-#: decks. `state` and `playlist` are built at 9.5, and are in OUTPUTS above
-#: because the names are decided - not because the component carries them yet.
+#: Every output the generated `.tox` carries: the program pair, both decks, and
+#: since 9.5 the two that describe the player rather than carry its signal.
 #:
 #: An Out operator the engine has nothing to feed would be an output connector
 #: answering an empty image, which is a worse thing for the host to find than
-#: no connector at all.
+#: no connector at all - so a name arrives here when the engine has something to
+#: put through it.
 DECLARED = (
     "program_video",
     "program_audio",
@@ -148,6 +148,8 @@ DECLARED = (
     DECK_AUDIO[0],
     DECK_VIDEO[1],
     DECK_AUDIO[1],
+    "state",
+    "playlist",
 )
 
 
@@ -195,6 +197,35 @@ STATE_CHANNELS = (
     "misses_b",
     "buffer_b",
 )
+
+#: The per-deck channels, in `build.PLAYER_TOPS` order, like the deck outputs
+#: above - so an index into any of these is the index into the players, the
+#: Cross TOP's inputs and the mixer's strips. Written out rather than built from
+#: the letters, for the reason `player.COMMANDS` is: a name assembled in a loop
+#: cannot be grepped.
+DECK_PLAYING = ("playing_a", "playing_b")
+DECK_ROW = ("row_a", "row_b")
+DECK_MISSES = ("misses_a", "misses_b")
+DECK_BUFFER = ("buffer_a", "buffer_b")
+
+#: The channels the host has to be *told* about rather than reading off an
+#: operator, and so the ones a Constant CHOP block holds rather than computes.
+#: `seed` is a Python global and `row_*` is a lookup over the playlist table;
+#: everything else in STATE_CHANNELS is an expression over an operator that
+#: already knows the answer. See `build._add_state`.
+PUSHED = ("seed",) + DECK_ROW
+
+
+def channel_index(name):
+    """Which Constant CHOP block carries that channel. Raises on a wrong name.
+
+    The engine writes the pushed channels by index and the host reads them all
+    by name, so this is the one place the order in STATE_CHANNELS means
+    anything. A wrong name is a bug rather than a runtime condition, hence the
+    raise: nothing here is answering another process.
+    """
+    return STATE_CHANNELS.index(name)
+
 
 #: A channel carries a number, and two of these values can be absent. The seed
 #: is None when the deck is in playlist order, and a deck with no clip loaded

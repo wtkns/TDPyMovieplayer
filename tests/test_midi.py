@@ -472,22 +472,39 @@ class TestLights:
 
     def test_light_states_answers_every_state_a_lamp_asks_for(self, monkeypatch):
         # The two tables are written in different places and this is where they
-        # have to agree. Faked because the real ones read the network.
-        monkeypatch.setattr(player, "playing_at", lambda index: True)
-        monkeypatch.setattr(player, "is_live", lambda index: False)
+        # have to agree. Faked because the real one reads the engine's output.
+        monkeypatch.setattr(engine, "state", lambda channel: 1.0)
         states = midi.light_states()
         for lamp in midi.LIGHTS:
             assert lamp.state in states
 
     def test_light_states_asks_each_deck_about_itself(self, monkeypatch):
-        # A per-deck reading that passed the same index twice would light both
-        # lamps together and look like a controller fault. The doubles record
-        # which index they were handed rather than what they were asked.
+        # A reading that named the same channel twice would light both lamps
+        # together and look like a controller fault. The double records which
+        # channel it was handed rather than what it was asked.
         asked = []
-        monkeypatch.setattr(player, "playing_at", lambda index: asked.append(index))
-        monkeypatch.setattr(player, "is_live", lambda index: False)
+
+        def state(channel):
+            asked.append(channel)
+            return 0.0
+
+        monkeypatch.setattr(engine, "state", state)
         midi.light_states()
-        assert asked == [0, 1]
+        assert asked == ["live", "playing_a", "playing_b"]
+
+    def test_the_live_lamps_follow_which_deck_the_cross_settles_on(self, monkeypatch):
+        # `live` is one channel carrying a deck index, so the two lamps are
+        # readings of the same number rather than two facts that could
+        # disagree - which is what they were when each asked `player.is_live`.
+        monkeypatch.setattr(engine, "state", lambda channel: 1.0)
+        states = midi.light_states()
+        assert (states["live_a"], states["live_b"]) == (False, True)
+
+    def test_a_silent_engine_leaves_every_lamp_dark(self, monkeypatch):
+        # None is what a channel reads before the component has loaded. A lamp
+        # lit on that would be claiming a deck is live before there is one.
+        monkeypatch.setattr(engine, "state", lambda channel: None)
+        assert set(midi.light_states().values()) == {False}
 
 
 class TestTheMapIsHonest:

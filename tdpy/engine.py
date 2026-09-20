@@ -95,7 +95,7 @@ ROOT = None
 #: down, and a wire joins siblings. The container is what lets `main()` be
 #: called twice - it is destroyed and rebuilt whole, exactly as `build()` does
 #: in the host.
-SELECT_PARAMETER = {"TOP": "top", "CHOP": "chops"}
+SELECT_PARAMETER = {"TOP": "top", "CHOP": "chops", "DAT": "dat"}
 
 #: What each Select is called: the output it feeds, prefixed. The Out operator
 #: already has the bare name, and two operators at one level cannot share one.
@@ -189,7 +189,7 @@ def _tap(root, item, source, td):
     """
     from . import startup
 
-    kinds = {"TOP": td.selectTOP, "CHOP": td.selectCHOP}
+    kinds = {"TOP": td.selectTOP, "CHOP": td.selectCHOP, "DAT": td.selectDAT}
     kind = kinds.get(item.family)
     if kind is None:
         raise LookupError(
@@ -240,6 +240,60 @@ def send(name):
         )
         return None
     return build.pulse(comp, parameter)
+
+
+def output(name):
+    """The host's Null carrying one engine output, or None. **Host side.**
+
+    **The one place in the host that knows where the engine's data arrives**,
+    and the reason it is one place. Today these Nulls are fed by an Engine COMP
+    in the same machine; the same surfaces would read a `Touch In CHOP` or an
+    `OSC In CHOP` from another machine without noticing, provided nothing but
+    this function ever names the source. A reader that reached for the Engine
+    COMP itself would have to be rewritten for that; a reader that asks for
+    "the CHOP called state" does not.
+
+    Silent when it is missing, unlike most lookups here. It is asked once per
+    drawn cell and once per repaint, and a line each time would fill a log kept
+    for launches with a record of the seconds before the engine loaded.
+    """
+    import td
+
+    from . import build
+
+    parent = td.op(build.BUILD_PARENT) or td.op("/")
+    return None if parent is None else parent.op(name)
+
+
+def state(channel):
+    """One state channel's value as a number, or None if it is not there yet.
+
+    None covers the whole of "the engine has not said": no component loaded, no
+    output wired, an older `.tox` without this channel. Every caller draws
+    something honest from that - no row highlighted, a lamp left dark - which is
+    the same thing they already did for a player with no clip.
+    """
+    from . import link
+
+    chop = output(link.output("state").name)
+    if chop is None:
+        return None
+    found = chop[channel]
+    return None if found is None else found.eval()
+
+
+def deck_state(channels):
+    """The live deck's value of a per-deck channel pair, or None.
+
+    `channels` is one of `link.DECK_ROW`, `DECK_PLAYING` and their siblings,
+    which are in player order - so this is "whichever of the two the cross is
+    settling on", asked once rather than by each surface that wants it.
+    """
+    live = state("live")
+    if live is None:
+        return None
+    index = 1 if round(live) else 0
+    return state(channels[index])
 
 
 def on_command(parameter):

@@ -19,16 +19,15 @@ every time, from the player's own `file` parameter - the same rule that keeps
 MIDI note, an automatic advance and a hand edit of the parameter all moved the
 highlight, because none of them was what the highlight was read from.
 
-**At 9.4 there is no highlight**, and the reason is the rule rather than an
-exception to it: the player is in the engine's process, so the parameter this
-display reads itself off is not reachable from here. Pushing the row across
-instead would be the mistake this module was built to avoid. What crosses at
-9.5 is the state CHOP, whose `row_a` and `row_b` are the same derivation
-arriving as a reading - see `_active`.
+**The player is in another process, and the rule survived it.** The row and the
+deck it belongs to arrive on the state output, the playlist arrives as a table,
+and both are read here rather than pushed from there - so a clip changed by the
+dwell, by a button, by MIDI or by a hand on the parameter moves this list the
+same way, and none of them has to know the list exists. What changed at 9.5 is
+that the derivation happens where the player is and crosses as two numbers.
 
-Ordering comes from `player.play_order()`, which in the host answers the
-playlist's own order: the seed lives in the engine now and crosses at 9.5 as
-well, so a shuffle does not reorder this list yet.
+The host does not scan `media/`. The folder belongs to the machine holding the
+files; this draws what that machine says it found.
 """
 
 from . import player, startup
@@ -192,26 +191,21 @@ def _justify(name):
 
 
 def _playlist_table():
-    """The playlist DAT the host draws from, or None with a line saying why.
+    """The playlist the engine scanned, as it arrives in the host, or None.
 
-    Found here rather than through `player.playlist_table()`, which since 9.4
-    answers about the engine's copy from inside the engine. This is the host's
-    own scan, and the host is where this list is drawn; at 9.5 it becomes the
-    engine's playlist arriving as a DAT output, which is one lookup changed.
+    **The host does not open `media/`.** The folder belongs to the machine
+    holding the files, which scans it and sends the table across; this is the
+    Null DAT that table lands in. `engine.output` is the only thing that knows
+    where it comes from, so a player on another machine changes that function
+    and nothing here.
+
+    None until the component has loaded and its output is wired, which is a
+    normal state for the first seconds of a launch rather than a fault - so it
+    is silent, and the list simply has no rows yet.
     """
-    import td
+    from . import engine, link
 
-    from . import build
-
-    parent = td.op(build.BUILD_PARENT) or td.op("/")
-    container = parent.op(build.BUILD_ROOT)
-    table = None if container is None else container.op(build.PLAYLIST_DAT)
-    if table is None:
-        startup.report(
-            f"[{startup.PACKAGE}] no {build.PLAYLIST_DAT} under"
-            f" {build.BUILD_ROOT} - has the build run?"
-        )
-    return table
+    return engine.output(link.output("playlist").name)
 
 
 def _table_and_order():
@@ -219,26 +213,40 @@ def _table_and_order():
 
     Row count comes from `numRows` rather than from reading a column, because
     this is called once per cell and once per row during a reset and the count
-    is the only thing needed to ask `player` for the order.
+    is the only thing needed to work out the order.
+
+    The order is `deck(count, seed)` against the seed the engine publishes, not
+    `player.play_order()`: that reads this process's own `SEED`, which in the
+    host is always None. The deck is the player's, and the host re-deals the
+    same cards from the same number rather than being sent a list of rows.
     """
+    from . import engine, link
+
     table = _playlist_table()
     count = 0 if table is None else max(table.numRows - 1, 0)
-    return table, player.play_order(count)
+    seed = engine.state("seed")
+    return table, player.deck(count, None if seed is None else link.from_channel(seed))
 
 
 def _active():
-    """Which list row is playing right now. **None until 9.5.**
+    """Which list row is playing right now, or None.
 
-    The clip on screen is decided in the engine's process and read off a player
-    there, so the host cannot answer this today. None is what every caller here
-    already handles - it is what an empty player has always meant - so the list
-    draws with no row highlighted rather than with the wrong one.
+    The engine publishes a row per deck and which deck the cross is settling
+    on; this asks for the live one. Still derived rather than remembered, and
+    still derived from what the player is actually doing - the difference from
+    Phase 5 is only that the derivation happens in another process and arrives
+    as a number.
 
-    At 9.5 this reads `row_a`/`row_b` off the state CHOP and picks the live
-    deck's, which is the same question `player.now_playing` answers inside the
-    engine.
+    None when the engine has not said yet, when the deck has no clip, or when
+    the clip is not in the playlist - all three already meant no highlight.
     """
-    return None
+    from . import engine, link
+
+    row = engine.deck_state(link.DECK_ROW)
+    if row is None:
+        return None
+    _, order = _table_and_order()
+    return active_row(order, link.from_channel(row))
 
 
 def init_table(comp, attribs):
@@ -326,6 +334,27 @@ def refresh():
             # does not get to take the build with it.
             pass
     return active
+
+
+def resize():
+    """Set the list's row count from the playlist that arrived, then redraw.
+
+    The table comes from the other process, so its length is not known when the
+    panel is built and changes again whenever the engine rescans - which is why
+    the List COMP's Rows is written here rather than at build time. One more
+    row than there are clips: row 0 is the header.
+
+    Called at the end of the build, with whatever has arrived by then, and from
+    the playlist's watcher every time the table changes. Both go through here,
+    so a list that is one row short is one place to look.
+    """
+    comp = _list_comp()
+    if comp is None:
+        return None
+
+    _, order = _table_and_order()
+    startup.set_par(comp, "rows", len(order) + 1)
+    return reset()
 
 
 def reset():

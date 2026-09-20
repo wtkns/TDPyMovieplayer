@@ -135,7 +135,7 @@ class TestOutputs:
 
 
 class TestDeclared:
-    def test_what_the_component_carries_today(self):
+    def test_what_the_component_carries(self):
         assert link.DECLARED == (
             "program_video",
             "program_audio",
@@ -143,22 +143,53 @@ class TestDeclared:
             "deck_a_audio",
             "deck_b_video",
             "deck_b_audio",
+            "state",
+            "playlist",
         )
 
-    def test_the_state_and_playlist_outputs_are_named_but_not_built(self):
-        # They are in OUTPUTS because the names are decided, and out of
-        # DECLARED because 9.5 is what builds them. An Out operator with
-        # nothing behind it would be a connector answering an empty image.
-        assert {"state", "playlist"} <= {item.name for item in link.OUTPUTS}
-        assert {"state", "playlist"}.isdisjoint(link.DECLARED)
+    def test_every_output_is_carried(self):
+        # They were not always: `state` and `playlist` were named here before
+        # 9.5 built them, because an Out operator the engine has nothing to
+        # feed is a connector answering an empty image.
+        assert set(link.DECLARED) == {item.name for item in link.OUTPUTS}
 
     def test_every_declared_name_is_a_real_output(self):
         assert [item.name for item in link.declared()] == list(link.DECLARED)
 
     def test_the_families_the_host_has_to_build_a_null_for(self):
         assert [item.family for item in link.declared()] == [
-            "TOP", "CHOP", "TOP", "CHOP", "TOP", "CHOP"
+            "TOP", "CHOP", "TOP", "CHOP", "TOP", "CHOP", "CHOP", "DAT"
         ]
+
+
+class TestDeckChannels:
+    def test_the_per_deck_channels_in_player_order(self):
+        assert link.DECK_PLAYING == ("playing_a", "playing_b")
+        assert link.DECK_ROW == ("row_a", "row_b")
+        assert link.DECK_MISSES == ("misses_a", "misses_b")
+        assert link.DECK_BUFFER == ("buffer_a", "buffer_b")
+
+    def test_every_per_deck_channel_is_on_the_state_output(self):
+        for pair in (
+            link.DECK_PLAYING, link.DECK_ROW, link.DECK_MISSES, link.DECK_BUFFER
+        ):
+            assert set(pair) <= set(link.STATE_CHANNELS), pair
+
+    def test_the_written_channels_are_the_seed_and_the_two_rows(self):
+        # The engine writes these and computes the rest. A channel that drifted
+        # onto this list would be written over an expression, and the symptom
+        # is a reading that stops moving.
+        assert link.PUSHED == ("seed", "row_a", "row_b")
+
+    def test_a_channels_index_is_where_the_engine_writes_it(self):
+        assert link.channel_index("live") == 0
+        assert link.channel_index("row_b") == 9
+
+    def test_an_unknown_channel_raises_rather_than_answering_a_block(self):
+        # A wrong name here would write over whichever channel happened to sit
+        # at the index a silent answer produced.
+        with pytest.raises(ValueError):
+            link.channel_index("rows")
 
 
 class TestState:
