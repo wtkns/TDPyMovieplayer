@@ -265,6 +265,20 @@ class TestColumnsAgreeWithTheRestOfTheProject:
         monkeypatch.setattr(engine, "deck_state", lambda channels: None)
         assert lister._active() is None
 
+    def test_a_new_seed_rebuilds_the_rows_and_a_cut_only_repaints(self, monkeypatch):
+        # The symptom this separates, seen on 2026-09-19: after a shuffle the
+        # highlight jumped to where the clip now sits in the deck while the
+        # list still showed the old order - so the lit row was the wrong clip.
+        # The order is written by the init callbacks, which only a reset runs.
+        calls = []
+        monkeypatch.setattr(lister, "reset", lambda: calls.append("reset"))
+        monkeypatch.setattr(lister, "refresh", lambda: calls.append("refresh"))
+
+        lister.on_state("seed")
+        lister.on_state("live")
+        lister.on_state("row_a")
+        assert calls == ["reset", "refresh", "refresh"]
+
     def test_the_highlight_is_the_live_decks_row(self, monkeypatch):
         # Two decks publish a row each and one channel says which is showing.
         # The row is a playlist index and the list has a header, so what comes

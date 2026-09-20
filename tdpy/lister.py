@@ -336,6 +336,30 @@ def refresh():
     return active
 
 
+def on_state(channel):
+    """Redraw whatever that state channel changing has affected. Returns the row.
+
+    **A moved row and a moved deck are not the same redraw**, and that is the
+    whole of what this decides. `live`, `row_a` and `row_b` change which clip is
+    playing, and the highlight is row attributes - `refresh` repaints those. The
+    seed changes the *order*, which moves every row's text, and text is written
+    by the init callbacks - so that one needs `reset`.
+
+    Doing the cheap one for a seed change is a specific and confusing symptom:
+    the highlight jumps to where the clip now sits in the deck while the list
+    still shows the old order, so the wrong row lights up. Doing the expensive
+    one for every cut would re-run the init callbacks over every cell several
+    times a cut.
+
+    The shim in `build.STATE_WATCH_CALLBACK` hands over a name and decides
+    nothing, like every other shim here - which is what makes this one function
+    rather than a condition in a DAT.
+    """
+    if channel == "seed":
+        return reset()
+    return refresh()
+
+
 def resize():
     """Set the list's row count from the playlist that arrived, then redraw.
 

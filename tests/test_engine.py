@@ -147,6 +147,34 @@ def par_mode(monkeypatch):
     )
 
 
+@pytest.fixture
+def painted(monkeypatch):
+    """The two surfaces the host repaints, recorded rather than drawn.
+
+    Both reach into the panel and the controller, which is a network and a
+    cable.
+    """
+    from tdpy import lister, midi
+
+    calls = []
+    monkeypatch.setattr(lister, "resize", lambda: calls.append("list"))
+    monkeypatch.setattr(midi, "refresh_lights", lambda: calls.append("lamps"))
+    return calls
+
+
+@pytest.fixture
+def paint_asked(monkeypatch):
+    """`wire_engine`'s request for a repaint, without the waiting behind it.
+
+    The wait is `_paint_when_published`'s and is tested on its own; what the
+    wiring has to get right is asking for it at all, since nothing else in the
+    host will draw the engine's first values.
+    """
+    calls = []
+    monkeypatch.setattr(build, "_paint_when_published", lambda: calls.append("paint"))
+    return calls
+
+
 class FakeParent:
     def __init__(self, children):
         self.path = "/project1"
@@ -198,7 +226,7 @@ class TestConnectorFor:
 
 class TestWireEngine:
     def test_every_declared_output_reaches_the_null_named_after_it(
-        self, par_mode, silent
+        self, par_mode, paint_asked, silent
     ):
         comp = _loaded_engine()
         assert build.wire_engine(comp) == list(link.DECLARED)
@@ -207,19 +235,35 @@ class TestWireEngine:
                 f"/project1/{item.name}"
             ]
 
-    def test_an_output_with_no_connector_says_what_there_is(self, par_mode, silent):
+    def test_an_output_with_no_connector_says_what_there_is(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         comp.outputConnectors = [FakeConnector("spike video")]
         assert build.wire_engine(comp) == []
         assert "'spike video'" in silent[0]
 
-    def test_no_outputs_yet_says_none(self, par_mode, silent):
+    def test_no_outputs_yet_says_none(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         comp.outputConnectors = []
         assert build.wire_engine(comp) == []
         assert silent[0].endswith("have none")
 
-    def test_a_missing_null_is_reported_not_raised(self, par_mode, silent):
+    def test_it_asks_for_a_repaint_once_it_has_wired_the_outputs(
+        self, par_mode, paint_asked, silent
+    ):
+        # Nothing else in the host will draw the engine's first values: they
+        # arrive holding what they mean rather than changing into it, so no
+        # watcher fires, and the build painted before any of this existed.
+        build.wire_engine(_loaded_engine())
+        assert paint_asked == ["paint"]
+
+    def test_ready_means_the_outputs_have_something_in_them(self):
+        # Engine_COMP.htm, Ready When: "buffered - ... sufficient frames have
+        # been cooked to fill the input and output buffers". On the default,
+        # Component Loaded, onReady fires before any frame has crossed and the
+        # paint above would draw against empty channels.
+        assert build.ENGINE_READY_WHEN == "buffered"
+
+    def test_a_missing_null_is_reported_not_raised(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         del comp.parent().children[link.DECLARED[0]]
         assert link.DECLARED[0] not in build.wire_engine(comp)
@@ -229,7 +273,7 @@ class TestWireEngine:
 class TestLinkSettings:
     """The host filling the engine's parameters from its own settings COMP."""
 
-    def test_each_parameter_reads_the_setting_of_the_same_name(self, par_mode, silent):
+    def test_each_parameter_reads_the_setting_of_the_same_name(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         build.wire_engine(comp)
         # Written out rather than built from `audio.parameter_expression`: this
@@ -238,7 +282,7 @@ class TestLinkSettings:
         assert comp.par.Dwell.expr == "op('/project1/settings').par.Dwell.eval()"
         assert comp.par.Levelb.expr == "op('/project1/settings').par.Levelb.eval()"
 
-    def test_a_parameter_left_in_constant_mode_would_be_inert(self, par_mode, silent):
+    def test_a_parameter_left_in_constant_mode_would_be_inert(self, par_mode, paint_asked, silent):
         # Both halves or neither: an expression on a parameter still in Constant
         # mode looks exactly like one that failed, and the engine would run on
         # the .tox's defaults with nothing saying so.
@@ -246,7 +290,7 @@ class TestLinkSettings:
         build.wire_engine(comp)
         assert comp.par.Dwell.mode == FakeParMode.EXPRESSION
 
-    def test_every_setting_is_linked(self, par_mode, silent):
+    def test_every_setting_is_linked(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         build.wire_engine(comp)
         unlinked = [
@@ -255,13 +299,13 @@ class TestLinkSettings:
         ]
         assert unlinked == []
 
-    def test_a_parameter_the_tox_never_declared_is_named(self, par_mode, silent):
+    def test_a_parameter_the_tox_never_declared_is_named(self, par_mode, paint_asked, silent):
         comp = _loaded_engine(missing=("Dwell",))
         build.wire_engine(comp)
         assert any("Dwell" in line and "regenerate" in line for line in silent)
         assert any(line.endswith("not linked: Dwell") for line in silent)
 
-    def test_no_settings_comp_is_reported_rather_than_raised(self, par_mode, silent):
+    def test_no_settings_comp_is_reported_rather_than_raised(self, par_mode, paint_asked, silent):
         comp = _loaded_engine()
         del comp.parent().children["settings"]
         build.wire_engine(comp)
@@ -332,6 +376,77 @@ class FakeStateChop:
     def __getitem__(self, name):
         found = self.values.get(name)
         return None if found is None else FakeChannel(found)
+
+
+class FakeRun:
+    """`td.run`, recording what was deferred instead of deferring it."""
+
+    def __init__(self):
+        self.deferred = []
+
+    def __call__(self, callable_, *args, delayFrames=0):
+        self.deferred.append((callable_, args, delayFrames))
+
+
+class TestPaintWhenPublished:
+    """The host waiting for the engine's first frame before drawing it.
+
+    The defect this exists for, seen on 2026-09-19: the clip list showed every
+    clip and highlighted nothing until the first cut. Its channels arrive
+    holding the right values rather than changing into them, so the watchers
+    have nothing to fire on, and the Nulls they are read through had not cooked
+    at the moment `onReady` wired them.
+    """
+
+    @pytest.fixture
+    def deferred(self, monkeypatch):
+        module = types.ModuleType("td")
+        module.run = FakeRun()
+        monkeypatch.setitem(sys.modules, "td", module)
+        return module.run
+
+    def test_it_waits_while_the_state_reads_nothing(
+        self, deferred, painted, monkeypatch, silent
+    ):
+        monkeypatch.setattr(engine, "state", lambda channel: None)
+        assert build._paint_when_published() is None
+        assert painted == []
+        # One frame at a time, so the wait is as short as the engine allows.
+        assert [delay for _, _, delay in deferred.deferred] == [1]
+
+    def test_it_counts_down_so_it_cannot_wait_forever(
+        self, deferred, painted, monkeypatch, silent
+    ):
+        monkeypatch.setattr(engine, "state", lambda channel: None)
+        build._paint_when_published(3)
+        assert deferred.deferred[0][1] == (2,)
+
+    def test_giving_up_says_so_rather_than_going_quiet(
+        self, deferred, painted, monkeypatch, silent
+    ):
+        monkeypatch.setattr(engine, "state", lambda channel: None)
+        assert build._paint_when_published(0) is None
+        assert deferred.deferred == []
+        assert "published no state" in silent[-1]
+
+    def test_it_paints_once_the_state_can_be_read(
+        self, deferred, painted, monkeypatch, silent
+    ):
+        monkeypatch.setattr(engine, "state", lambda channel: 0.0)
+        assert build._paint_when_published() is True
+        assert painted == ["list", "lamps"]
+        assert deferred.deferred == []
+
+    def test_a_live_deck_of_zero_is_a_reading_and_not_an_absence(
+        self, deferred, painted, monkeypatch, silent
+    ):
+        # Deck A is `live = 0`, which is falsy and is the value the channel
+        # holds for the whole of a launch that has not cut yet. Testing the
+        # channel for truth rather than for None would wait out all 120 frames
+        # and then report a fault, on the most ordinary state there is.
+        monkeypatch.setattr(engine, "state", lambda channel: 0.0)
+        build._paint_when_published()
+        assert painted == ["list", "lamps"]
 
 
 class TestReadingWhatTheEngineSays:

@@ -976,6 +976,22 @@ ENGINE_CALLBACK_DAT = "engine_callbacks"
 #: left the default in place and every clip unfound, with nothing said.
 ENGINE_ASSET_PATHS = "toe"
 
+#: Ready When: not until the engine's outputs actually carry something.
+#:
+#: **This is what makes `onReady` a moment worth painting at.** The default is
+#: Component Loaded, which is true before any frame has crossed - so the host
+#: would draw its clip list against a state output with no channels in it, and
+#: then never draw it again, because the channels arrive *already holding* the
+#: right values and a watcher only fires on a change. That is precisely what
+#: happened on 2026-09-19: the list showed every clip and no highlight until the
+#: first cut moved a channel.
+#:
+#: `Engine_COMP.htm` on this item: ready "when TouchEngine has loaded the
+#: component and sufficient frames have been cooked to fill the input and output
+#: buffers". Which is the condition the host actually needs, stated by the
+#: parameter rather than guessed at with a frame delay.
+ENGINE_READY_WHEN = "buffered"
+
 #: The Parameter Execute DAT inside the engine that turns a pulsed parameter
 #: back into a transport command, and the shim it holds.
 #:
@@ -1414,6 +1430,7 @@ def _add_engine(parent, td):
         comp = _place(startup.create(parent, td.engineCOMP, ENGINE_COMP), 250, -300)
     startup.set_menu(comp, "clock", "synced")
     startup.set_menu(comp, "assetpaths", ENGINE_ASSET_PATHS)
+    startup.set_menu(comp, "readywhen", ENGINE_READY_WHEN)
     startup.set_par(comp, "callbacks", callbacks.path)
     startup.set_par(comp, "file", str(path))
     if existing is not None:
@@ -1510,7 +1527,62 @@ def wire_engine(comp):
         f"[{startup.PACKAGE}] engine outputs wired: {', '.join(wired) or 'none'}"
     )
     _link_settings(comp, parent)
+
+    # The surfaces are painted from here rather than at build time, because at
+    # build time the engine has published nothing - and its channels then
+    # arrive holding their values rather than changing into them, so no watcher
+    # fires and a list drawn early stays wrong until the first cut.
+    #
+    # **Not in this frame, though.** The Nulls above were connected a moment
+    # ago and have not cooked since, so reading one here gets the empty CHOP it
+    # was before the wire. That is what `_paint_when_published` is waiting for.
+    _paint_when_published()
     return wired
+
+
+#: How long the host will wait for the engine's first published frame before
+#: giving up and saying so: 120 frames, two seconds at 60fps.
+#:
+#: A bound rather than a schedule. How many frames it actually takes depends on
+#: the Engine COMP's output buffer and on when the Nulls first cook, neither of
+#: which this project decides - so the host asks each frame whether the state
+#: has arrived rather than guessing a number of frames and hoping.
+ENGINE_PAINT_ATTEMPTS = 120
+
+
+def _paint_when_published(attempts=ENGINE_PAINT_ATTEMPTS):
+    """Draw the clip list and the lamps once the engine's state can be read.
+
+    Called from `wire_engine`, and again a frame at a time until the state
+    output answers. The condition is the reading itself - `engine.state`
+    returning a number rather than None - so nothing here depends on how many
+    frames the buffers take to fill.
+
+    Gives up after `ENGINE_PAINT_ATTEMPTS` and says so, because an engine that
+    never publishes is a fault worth a line rather than a callback that
+    reschedules itself for the life of the session.
+    """
+    import td
+
+    from . import engine, lister, midi, startup
+
+    if engine.state("live") is None:
+        if attempts <= 0:
+            startup.report(
+                f"[{startup.PACKAGE}] the engine published no state in"
+                f" {ENGINE_PAINT_ATTEMPTS} frames - the clip list and the lamps"
+                " will not show what it is doing"
+            )
+            return None
+        # `run` takes a callable and its arguments, and is the same deferral
+        # `DAT/StartupExec.py` uses to step out of a callback that is too early
+        # to do what it wants - documented in the install's `Td_Module.htm`.
+        td.run(_paint_when_published, attempts - 1, delayFrames=1)
+        return None
+
+    lister.resize()
+    midi.refresh_lights()
+    return True
 
 
 def _link_settings(comp, parent):
@@ -1853,7 +1925,7 @@ def onValueChange(channel, sampleIndex, val, prev):
     import tdpy.lister
     import tdpy.midi
 
-    tdpy.lister.refresh()
+    tdpy.lister.on_state(channel.name)
     tdpy.midi.refresh_lights()
     return
 '''
