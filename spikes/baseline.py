@@ -63,10 +63,10 @@ for a trend line, but the number that answers the question is sampled once
 every clip change goes through - dwell, loop, button, MIDI - so wrapping it
 here is the one hook that sees every cut without five separate ones.
 
-For 9.7, pass `sources` naming the engine's Info CHOP channels instead of the
-players' - `engine_read_ahead_misses` in place of `pre_read_misses` - since the
-players will be in another process. Frame timing needs no equivalent change:
-`on_frame` times the host's own frames either way.
+For 9.7, pass `sources=engine_sources()`, which names the Engine COMP's Info
+CHOP channels rather than the players' - the players being in another process
+since 9.4, where `player_sources()`'s paths no longer resolve. Frame timing
+needs no equivalent change: `on_frame` times the host's own frames either way.
 """
 
 import csv
@@ -141,7 +141,14 @@ _ORIGINAL_CUE = None
 
 
 def player_sources():
-    """(label, CHOP path, channel) for each player's pre-read misses and buffer."""
+    """(label, CHOP path, channel) for each player's pre-read misses and buffer.
+
+    **The 9.0 shape, and it no longer resolves.** The Info CHOPs it names are
+    inside the engine's process since 9.4, so every path here answers None in
+    the host and `_read` reports each one once. Kept because the 9.0 numbers on
+    330.0020 were taken through it and a reader comparing the two runs should
+    be able to see what each measured.
+    """
     build, _, _ = _tdpy()
     container = f"{build.BUILD_PARENT}/{build.BUILD_ROOT}"
     sources = []
@@ -149,6 +156,36 @@ def player_sources():
         sources.append((f"{top}_misses", f"{container}/{info}", "pre_read_misses"))
         sources.append((f"{top}_buffer", f"{container}/{info}", "num_pre_read_frames"))
     return sources
+
+
+def engine_sources():
+    """(label, CHOP path, channel) for the 9.7 run: the engine's own readings.
+
+    What `player_sources` measured, taken from the other side of the boundary.
+    The per-player Info CHOPs are in the engine's process now and the host
+    cannot reach them, so the equivalent numbers come off the Engine COMP's own
+    Info CHOP, which 9.6 built for the panel's health row.
+
+    **`engine_read_ahead_misses` is not `pre_read_misses` summed.**
+    `Engine_COMP.htm` calls it "how many times the movie read ahead failed" in
+    TouchEngine - the whole process, both players and anything else decoding -
+    where the 9.0 figure was per player and sampled per deck. The two answer the
+    same question at different resolutions, which is worth saying out loud in
+    the 9.7 writeup rather than leaving a reader to compare them as like for
+    like. The per-deck numbers are still reachable: they cross as
+    `link.DECK_MISSES` and the diagnostics strip draws them.
+
+    Frame timing needs nothing from here. `on_frame` times the host's own
+    frames with `perf_counter`, which is the same instrument either way.
+    """
+    build, _, _ = _tdpy()
+    info = f"{build.BUILD_PARENT}/{build.ENGINE_INFO_CHOP}"
+    return [
+        ("engine_misses", info, "engine_read_ahead_misses"),
+        ("engine_dropped", info, "engine_dropped_frames"),
+        ("engine_fps", info, "engine_fps"),
+        ("engine_frame_ms", info, "engine_frame_msec"),
+    ]
 
 
 def start(label="single", seed=SEED, minutes=MINUTES, sources=None):
@@ -174,7 +211,13 @@ def start(label="single", seed=SEED, minutes=MINUTES, sources=None):
         "seed": seed,
         "until": time.perf_counter() + minutes * 60.0,
         "started": time.perf_counter(),
-        "sources": list(player_sources() if sources is None else sources),
+        # **The default moved from `player_sources` at 9.6**, because since 9.4
+        # it names Info CHOPs in the other process and every one of its paths
+        # answers None here. A bare `b.start()` would have written empty miss
+        # columns and a CSV that looked like a run - the recorder failing the
+        # way its own first version did, which is what it was rebuilt to stop.
+        # Pass `sources=player_sources()` to reproduce a 9.0 run.
+        "sources": list(engine_sources() if sources is None else sources),
         "settings_before": before,
         "frames": 0,
         "last_frame_at": None,

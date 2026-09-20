@@ -542,6 +542,7 @@ PANEL_ROWS = (
     "parameters",
     "cliplist",
     "diagnostics",
+    "health",
 )
 
 #: Toggle Down: on when pushed, off when pushed again. These are values, not
@@ -626,6 +627,110 @@ DIAGNOSTIC_READINGS = (
 )
 
 
+#: The engine health row: a line of readings, and under it whatever the Engine
+#: COMP has to say for itself when something has gone wrong.
+#:
+#: **The strip above this one and this one are not the same measurement.**
+#: Diagnostics is the decoder's, derived inside the engine and carried across as
+#: state channels; health is the host's own reading of the boundary, and exists
+#: because the engine cannot report its own crash. The distinction shows in
+#: where each reads from - `state` for one, the Engine COMP's Info CHOP for the
+#: other - and it is why a failure that blanks the strip still lights this row.
+HEALTH_COMP = "health"
+HEALTH_LINE_COMP = "healthLine"
+HEALTH_ERROR_COMP = "healthError"
+HEALTH_LINE_HEIGHT = 40
+HEALTH_ERROR_HEIGHT = 100
+HEALTH_HEIGHT = HEALTH_LINE_HEIGHT + PANEL_SPACING + HEALTH_ERROR_HEIGHT
+HEALTH_LINE_FONT_SIZE = 20
+HEALTH_ERROR_FONT_SIZE = 14
+
+#: The two state families, each a name and its mutually exclusive channels in
+#: the order `Engine_COMP.htm` gives them. The readout names whichever channel
+#: in a family reads 1, so the line says "engine running component loaded"
+#: rather than printing eight zeros and a one.
+#:
+#: The labels are the channel names with their family prefix taken off, which is
+#: why they are written out rather than sliced: a label assembled from the
+#: channel name would put the channel into the expression as a computed string,
+#: and TouchDesigner tracks an expression's dependencies by what it references.
+#:
+#: **A third family is deliberately left out.** `initializing`, `ready`,
+#: `running` and `done` describe the Engine COMP's own lifecycle, which is the
+#: least informative of the three when the question is whether the player is
+#: alive - the host already knows it called for a load. Add it here if that
+#: turns out to be wrong; nothing else has to change.
+HEALTH_STATES = (
+    (
+        "engine",
+        (
+            ("none", "engine_none"),
+            ("launching", "engine_launching"),
+            ("running", "engine_running"),
+            ("error", "engine_error"),
+        ),
+    ),
+    (
+        "component",
+        (
+            ("none", "component_none"),
+            ("loading", "component_loading"),
+            ("loaded", "component_loaded"),
+            ("unloading", "component_unloading"),
+            ("error", "component_error"),
+        ),
+    ),
+)
+
+#: The numbers, as (channel, label, decimals). Every one is the engine's own,
+#: measured in the other process and reported by the Engine COMP.
+#:
+#: Label before the number, which is how the diagnostics strip directly above
+#: reads - the two rows sit against each other and a reader scanning down them
+#: should not have to change direction halfway.
+#:
+#: `engine_read_ahead_misses` is the whole-engine counterpart of the per-deck
+#: `misses_*` on the strip above, and the two are worth having side by side: the
+#: deck channels are derived inside the engine and cross as state, this one is
+#: read out here, so they disagreeing is itself a reading.
+#:
+#: **`engine_frame_msec` was here and is not on the operator.**
+#: `Engine_COMP.htm`'s Info CHOP section names it; the live Info CHOP, set to
+#: All and carrying 53 channels, answers None for it. Read off the running
+#: Engine COMP on 2026-09-19. So the help's channel list ranks with its
+#: parameter table: a source for roughly what an operator reports, not for what
+#: it answers to - which is now true of three of the install's five
+#: descriptions. Anything added here is checked against a live Info CHOP first,
+#: and `_health_available` is what stops a wrong name costing the whole row.
+HEALTH_READINGS = (
+    ("engine_fps", "fps", 1),
+    ("engine_dropped_frames", "drop", 0),
+    ("engine_read_ahead_misses", "miss", 0),
+)
+
+#: Multi Line, because the default is String and `Text_COMP.htm` says that mode
+#: "will be appended into one line" - a traceback set on a Text COMP left at its
+#: default renders as one unreadable row, and nothing says so.
+HEALTH_ERROR_TYPE = "multiline"
+HEALTH_ERROR_WRAP = True
+HEALTH_TEXT_ALIGN_X = "left"
+HEALTH_TEXT_ALIGN_Y = "top"
+
+#: The row's background, healthy and not. Set by expression over the two error
+#: channels, so the colour is pulled like every other reading here rather than
+#: pushed by whatever last noticed.
+HEALTH_OK_BG = (0.0, 0.0, 0.0)
+HEALTH_ERROR_BG = (0.40, 0.04, 0.04)
+
+#: The three parameters those colours are written to, in the order the tuples
+#: above are. Written out rather than assembled from "bgcolor" and a letter,
+#: for the reason `player.COMMANDS` is: a name built in a loop cannot be
+#: grepped, and these three are what a search for a wrong colour would look
+#: for. Read off `bin/Lib/tdi/ops/comps/textCOMP.py`, which also carries the
+#: `bgalpha` beside them.
+HEALTH_BG_PARS = ("bgcolorr", "bgcolorg", "bgcolorb")
+
+
 def _diagnostics_expression(label, chop_path, index):
     """The Text COMP `text` expression for one deck. Returns the string.
 
@@ -658,6 +763,353 @@ def _diagnostics_expression(label, chop_path, index):
         for pair, name, places in DIAGNOSTIC_READINGS
     )
     return f'f"{label}  {parts}"'
+
+
+def _health_reading(chop_path, channel):
+    """One Info CHOP channel as a sub-expression. Returns the string.
+
+    The channel name is a literal here, and every caller keeps it one. An
+    expression that built a name - `'engine_' + family` - would read the right
+    number and register the wrong dependency, so the readout would cook when it
+    felt like it. `_diagnostics_expression` makes the same argument at length.
+
+    `.eval()` for the reason it has there: `op(chop)['channel']` answers a
+    `td.Channel`, and formatting one raises.
+    """
+    return f"op({chop_path!r})[{channel!r}].eval()"
+
+
+def _health_available(info):
+    """What this Info CHOP actually carries. Returns (states, readings, errors, missing).
+
+    **One wrong channel name used to cost the whole row**, and that is why this
+    exists. `op(chop)['absent']` answers None, `None.eval()` raises, and a
+    parameter expression that raises puts the parameter in error - so the Text
+    COMP renders blank, which on a black container is indistinguishable from an
+    empty panel. Seen on 2026-09-19: `engine_frame_msec` is in
+    `Engine_COMP.htm`'s channel list and not on the operator, and it took the
+    state words and the error colour down with it.
+
+    That failure is unacceptable *here* in a way it would not be elsewhere.
+    This row is what the panel says when the player has died; a design where a
+    stale help page can silence it is the wrong shape whatever the channel
+    names turn out to be. So the names are checked against the operator that
+    answers them, once, at build time.
+
+    **Not a silent fallback.** A dropped channel is reported by name, and every
+    surviving reading is drawn - which is what `set_menu` does with a menu item
+    the parameter will not take. The alternative is a row that is blank and
+    innocent-looking, which is the thing being fixed.
+    """
+    missing = []
+
+    def present(channel):
+        if info[channel] is not None:
+            return True
+        missing.append(channel)
+        return False
+
+    states = tuple(
+        (family, kept)
+        for family, kept in (
+            (family, tuple((l, c) for l, c in pairs if present(c)))
+            for family, pairs in HEALTH_STATES
+        )
+        if kept
+    )
+    readings = tuple(item for item in HEALTH_READINGS if present(item[0]))
+    errors = tuple(c for c in ENGINE_ERROR_CHANNELS if present(c))
+    return states, readings, errors, tuple(missing)
+
+
+def _health_expression(chop_path, states, readings):
+    """The health line's `text` expression. Returns the string.
+
+    State words and numbers, all pulled. A state family is a set of mutually
+    exclusive flags, so the word is whichever of them reads 1 - found with a
+    `next()` over a tuple of literal (label, reading) pairs, which puts every
+    channel in the family into the expression where the dependency tracker can
+    see it.
+
+    `'?'` when no flag in a family is set. That is not defensive padding: it is
+    what the line reads before the Info CHOP has cooked, and a readout that
+    said "none" there would be claiming a measurement it had not made.
+
+    `states` and `readings` are passed rather than read off the module, because
+    what belongs in the expression is what the operator carries - see
+    `_health_available`.
+    """
+    parts = []
+    for family, pairs in states:
+        literals = ", ".join(
+            f"({label!r}, {_health_reading(chop_path, channel)})"
+            for label, channel in pairs
+        )
+        parts.append(
+            family + " {" + f"next((l for l, v in ({literals},) if v), '?')" + "}"
+        )
+    for channel, label, places in readings:
+        parts.append(
+            label + " {" + f"{_health_reading(chop_path, channel)}:.{places}f" + "}"
+        )
+    return 'f"' + "  ".join(parts) + '"'
+
+
+def _health_background_expression(chop_path, index, channels):
+    """One background colour component as an expression. Returns the string.
+
+    Red while any error channel is up, and the row's own colour otherwise. An
+    expression rather than a colour something sets on noticing, so it cannot be
+    left red after a reload fixed the fault - which is the failure mode that
+    matters here, a panel saying broken about a player that is working.
+
+    With no channels it is the healthy colour and nothing else. That is an
+    engine whose Info CHOP carries neither error flag, which `_health_available`
+    has already reported by name - and a row stuck red would be worse than a
+    row that is honestly only a readout. An empty `or` would also be a syntax
+    error rather than a colour.
+    """
+    if not channels:
+        return repr(HEALTH_OK_BG[index])
+    flags = " or ".join(_health_reading(chop_path, channel) for channel in channels)
+    return f"{HEALTH_ERROR_BG[index]} if ({flags}) else {HEALTH_OK_BG[index]}"
+
+
+def _add_health(panel, td):
+    """The engine health row: a line of readings, and the error text under it.
+
+    **The only surface here that reads the Engine COMP rather than the player.**
+    Everything else on this panel goes through `engine.output`, so that a player
+    on another machine would change nothing; this row is about the boundary
+    itself, and on the day that boundary is a network socket it is replaced
+    rather than repointed. `engine.health` carries the rest of that argument.
+
+    The readings are expressions and the error text is painted, and the split is
+    not arbitrary: a channel is a reference TouchDesigner can track, and
+    `errors()` is a method call it cannot. So the numbers stay fresh by being
+    pulled, and the traceback needs `_add_health_watch` to tell it.
+
+    An error line that is blank rather than absent when all is well. A row that
+    appeared only on a fault would be indistinguishable from a row that never
+    worked, and this is the one surface whose silence has to be trustworthy.
+    """
+    from . import startup
+
+    row = startup.create(panel, td.containerCOMP, HEALTH_COMP)
+    row.nodeX, row.nodeY = 0, -1000
+    startup.set_par(row, "w", _panel_width())
+    startup.set_par(row, "h", HEALTH_HEIGHT)
+    # Stacked, unlike every other row on this panel - the readings sit above the
+    # traceback rather than beside it, because a traceback needs the full width.
+    startup.set_menu(row, "align", CONTROL_PANEL_ALIGN)
+    startup.set_par(row, "spacing", PANEL_SPACING)
+    startup.set_par(row, "alignorder", _row_order("health"))
+
+    info = _engine_info()
+    if info is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {ENGINE_INFO_CHOP} to read"
+            f" - {row.path} will be empty and a failed engine will say nothing"
+        )
+        return row
+
+    line = startup.create(row, td.textCOMP, HEALTH_LINE_COMP)
+    line.nodeX, line.nodeY = 0, -1000
+    startup.set_par(line, "w", _panel_width())
+    startup.set_par(line, "h", HEALTH_LINE_HEIGHT)
+    startup.set_par(line, "fontsize", HEALTH_LINE_FONT_SIZE)
+    startup.set_par(line, "alignorder", 0)
+
+    readout = startup.create(row, td.textCOMP, HEALTH_ERROR_COMP)
+    readout.nodeX, readout.nodeY = 200, -1000
+    startup.set_par(readout, "w", _panel_width())
+    startup.set_par(readout, "h", HEALTH_ERROR_HEIGHT)
+    startup.set_par(readout, "fontsize", HEALTH_ERROR_FONT_SIZE)
+    startup.set_par(readout, "alignorder", 1)
+    # Multi Line and wrapped, or a traceback arrives as one row running off the
+    # edge - `Text_COMP.htm` says String mode appends every line into one, and
+    # that Word Wrap works in Multi Line only. The default is String.
+    startup.set_menu(readout, "type", HEALTH_ERROR_TYPE)
+    startup.set_par(readout, "wordwrap", HEALTH_ERROR_WRAP)
+
+    # Checked against the operator that answers them, not against the help.
+    # A name the Info CHOP does not carry would otherwise put the whole `text`
+    # parameter in error and render the row blank - see `_health_available`.
+    states, readings, error_channels, missing = _health_available(info)
+    if missing:
+        startup.report(
+            f"[{startup.PACKAGE}] {info.path} does not carry"
+            f" {', '.join(missing)} - dropped from the health row"
+        )
+
+    mode = startup.td_enum("ParMode")
+    for text_comp in (line, readout):
+        startup.set_menu(text_comp, "alignx", HEALTH_TEXT_ALIGN_X)
+        startup.set_menu(text_comp, "aligny", HEALTH_TEXT_ALIGN_Y)
+        # Set rather than left at whatever the default is, for the same reason
+        # the loop watchers turn off the triggers they do not want: a colour
+        # nothing draws looks exactly like a colour that was never computed.
+        startup.set_par(text_comp, "bgalpha", 1)
+        if mode is None:
+            continue
+        for index, name in enumerate(HEALTH_BG_PARS):
+            _set_expression(
+                getattr(text_comp.par, name),
+                _health_background_expression(info.path, index, error_channels),
+                startup,
+            )
+
+    if mode is not None:
+        _set_expression(
+            line.par.text, _health_expression(info.path, states, readings), startup
+        )
+
+    # Painted once here, and by the watchers after this. The build-time paint is
+    # what covers an engine that is *already* in error when the panel is rebuilt
+    # - no channel changes in that case, so no watcher fires, and the row would
+    # come up blank over a dead player.
+    paint_engine_error()
+
+    startup.report(
+        f"[{startup.PACKAGE}] engine health at {row.path} <- {info.path}: "
+        + (", ".join(label for _, label, _ in readings) or "no readings")
+    )
+    return row
+
+
+def _engine_info():
+    """The Engine COMP's Info CHOP, or None. **Host side.**
+
+    Its own lookup rather than `engine.output`'s, for the reason `engine.health`
+    gives: an output is the player's and could come from anywhere, and this is
+    the host reading the boundary in front of it.
+    """
+    import td
+
+    parent = td.op(BUILD_PARENT) or td.op("/")
+    return None if parent is None else parent.op(ENGINE_INFO_CHOP)
+
+
+def paint_engine_error():
+    """Put the Engine COMP's error text on the panel and in the log. Returns it.
+
+    Called by the health watchers and once as the row is built. It recomputes
+    the whole readout from `engine.errors()` and so does not care which channel
+    fired, or whether anything fired at all.
+
+    **Written as an expression holding a literal, not as a constant string.**
+    `Text_COMP.htm` says escape sequences "are ignored and treated as literals
+    when the parameter is in constance mode" and directs anything with newlines
+    in it to expression mode - and a traceback is nothing but newlines. A
+    `repr()` is a Python literal whatever the text contains, including the
+    backslashes in every Windows path in the traceback, so this is the one route
+    the help blesses outright. It registers no dependency and does not need one:
+    the value changes when this function is called and at no other time.
+
+    It logs as well as painting, because the panel is only in front of someone
+    while they are watching it and the traceback is the whole content of what
+    went wrong. Reported whichever way it came out - an engine with nothing to
+    say is worth one line at build, since that line is the evidence the surface
+    is wired at all.
+    """
+    from . import engine, startup
+
+    text = engine.errors()
+    parent = _control_panel()
+    readout = None if parent is None else parent.op(HEALTH_ERROR_COMP)
+    if readout is None:
+        if text:
+            startup.report(
+                f"[{startup.PACKAGE}] engine error, and no panel to show it:\n{text}"
+            )
+        return text
+
+    written = _set_expression(readout.par.text, repr(text), startup)
+    if written is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no ParMode - {readout.path} will stay blank"
+        )
+    startup.report(
+        f"[{startup.PACKAGE}] engine error:\n{text}"
+        if text
+        else f"[{startup.PACKAGE}] engine reports no error"
+    )
+    return text
+
+
+def _control_panel():
+    """The health row inside the control panel, or None. **Host side.**
+
+    Reached by path rather than handed in, because the watchers that call
+    `paint_engine_error` are DAT callbacks with nothing to hand it. Every step
+    can be missing: the panel is destroyed and rebuilt on every build, and a
+    watcher can fire in the frames while it is gone.
+    """
+    import td
+
+    parent = td.op(BUILD_PARENT) or td.op("/")
+    panel = None if parent is None else parent.op(CONTROL_PANEL_COMP)
+    return None if panel is None else panel.op(HEALTH_COMP)
+
+
+def _add_health_watch(container, td):
+    """A watcher per error channel, so the traceback gets painted. Returns them.
+
+    In the container and after the panel, for the reason the state watchers are
+    both: a rebuild replaces them rather than leaving two on one channel, and
+    they call into a panel that has to exist first.
+
+    `valuechange` only. The rising edge alone would leave a fixed engine showing
+    the error that a reload cleared, and the value falling back to 0 is exactly
+    the event that clears it.
+    """
+    from . import startup
+
+    info = _engine_info()
+    if info is None:
+        startup.report(
+            f"[{startup.PACKAGE}] no {ENGINE_INFO_CHOP} under {BUILD_PARENT}"
+            " - an engine failure will not reach the panel"
+        )
+        return []
+
+    # Only the channels the Info CHOP carries. A CHOP Execute pointed at a
+    # channel that is not there watches nothing and says nothing, which on the
+    # surface that reports failure is the worst shape available - so an absent
+    # one is named here rather than left to look like an engine that never
+    # faulted. Same check `_health_available` makes for the readout.
+    absent = [c for c in ENGINE_ERROR_CHANNELS if info[c] is None]
+    if absent:
+        startup.report(
+            f"[{startup.PACKAGE}] {info.path} does not carry {', '.join(absent)}"
+            " - a failure on that channel will not reach the panel"
+        )
+
+    made = []
+    for index, channel in enumerate(c for c in ENGINE_ERROR_CHANNELS if c not in absent):
+        watcher = _place(
+            startup.create(
+                container, td.chopexecuteDAT, ENGINE_ERROR_EXEC_PREFIX + channel
+            ),
+            750, -200 - index * 100,
+        )
+        watcher.text = ENGINE_ERROR_CALLBACK
+        startup.set_par(watcher, "chop", info.path)
+        startup.set_par(watcher, "channel", channel)
+        startup.set_par(watcher, "valuechange", True)
+        startup.set_par(watcher, "offtoon", False)
+        startup.set_par(watcher, "whileon", False)
+        startup.set_par(watcher, "ontooff", False)
+        startup.set_par(watcher, "whileoff", False)
+        startup.set_par(watcher, "active", True)
+        made.append(watcher)
+
+    startup.report(
+        f"[{startup.PACKAGE}] watching"
+        f" {', '.join(c for c in ENGINE_ERROR_CHANNELS if c not in absent) or 'nothing'}"
+        f" on {info.path}, {len(made)} watcher(s)"
+    )
+    return made
 
 
 #: The Panel Execute DAT watching every button, and the shim it holds. One DAT
@@ -704,7 +1156,17 @@ CLIP_LIST_CALLBACK_DAT = "clipList_callbacks"
 #: grown to fit the playlist: a folder of twenty clips is already taller than a
 #: window wants to be and the folder is meant to change, so the list scrolls
 #: instead of the window resizing itself out from under whoever is using it.
-CLIP_LIST_HEIGHT = 620
+#:
+#: **620 until 9.6, and the 140 went to the health row** (jms's call). The panel
+#: had 60 spare against the height a window can be on the control display, and a
+#: line of engine readings with a traceback under it needs about 180 - so the
+#: room came from the one row whose height is a preference rather than a
+#: measurement. It costs about four rows of the roughly seventeen in `media/`
+#: today, which is a smaller change than it sounds: the paragraph above already
+#: says this list scrolls rather than showing a whole folder, so the number that
+#: moved was how much of it is visible at once and not whether all of it is
+#: reachable.
+CLIP_LIST_HEIGHT = 480
 
 #: Every callback is a shim into `tdpy.lister`, for the reason the buttons are
 #: shims into `tdpy.player`: a DAT's contents are inside the .toe, and the .toe
@@ -955,6 +1417,46 @@ def onReceiveMIDI(dat, rowIndex, message, channel, index, value, input, byteData
 ENGINE_COMP = "engine"
 ENGINE_CALLBACK_DAT = "engine_callbacks"
 
+#: The Info CHOP reading the Engine COMP, and the two channels that mean a
+#: fault. This is the host's view of the boundary rather than anything the
+#: player published - see `engine.health` for why it is not an output.
+#:
+#: **Created before the component's `file` is set**, which is the whole of what
+#: makes the error watchers work. Setting `file` starts the load, so an Info
+#: CHOP made afterwards could find `component_error` already at 1 and never see
+#: it rise - the same first-frame trap the clip list fell into at 9.5, arriving
+#: this time on the one surface whose job is to notice a failure.
+#:
+#: Info Type is `INFO_TYPE`, All, for the reason the players' Info CHOPs use it:
+#: the narrower menus are documented by what they are called rather than by
+#: which channels they carry, and a watcher wired to a channel that is not there
+#: fails silently.
+ENGINE_INFO_CHOP = "engineInfo"
+
+#: `Engine_COMP.htm` distinguishes the two: `engine_error` is "an error
+#: unrelated to the component" - TouchEngine itself - and `component_error` is
+#: "an error loading or running a component", which is where a raise inside
+#: `tdpy` arrives. Both are watched and both colour the row, because the panel's
+#: question is whether the player is alive rather than whose fault it is.
+ENGINE_ERROR_CHANNELS = ("engine_error", "component_error")
+
+#: The watchers on those channels, and the shim they hold. One DAT per channel,
+#: for the reason `STATE_WATCH_EXEC_PREFIX`'s are: the CHOP Execute's Channel
+#: parameter is singular and the help gives no syntax for naming several.
+#:
+#: The callback recomputes the whole readout and so does not care which of the
+#: two fired - the same shape the dwell's three watchers take.
+ENGINE_ERROR_EXEC_PREFIX = "health_"
+ENGINE_ERROR_CALLBACK = '''# Generated by tdpy/build.py - edits here are overwritten.
+
+
+def onValueChange(channel, sampleIndex, val, prev):
+    import tdpy.build
+
+    tdpy.build.paint_engine_error()
+    return
+'''
+
 #: Asset Paths: relative paths inside the component resolve against the `.toe`
 #: rather than against the `.tox`, which is the default.
 #:
@@ -1116,6 +1618,10 @@ def build():
     # After the panel, because they call into it - and in the container, so a
     # rebuild replaces them rather than leaving two watchers on one channel.
     _add_state_watch(container, parent, td)
+    # Same two reasons, on the other half of what the host watches: these read
+    # the Engine COMP's own Info CHOP rather than an engine output, and they
+    # paint a row of the panel that has to have been built first.
+    _add_health_watch(container, td)
 
     # After the panel exists, so the list has whatever the engine has already
     # sent rather than waiting for the next change. On a first launch that is
@@ -1432,6 +1938,20 @@ def _add_engine(parent, td):
     startup.set_menu(comp, "assetpaths", ENGINE_ASSET_PATHS)
     startup.set_menu(comp, "readywhen", ENGINE_READY_WHEN)
     startup.set_par(comp, "callbacks", callbacks.path)
+
+    # **Before `file`, and that ordering is the feature.** Setting `file` is
+    # what starts the load, so an Info CHOP created after it could come up with
+    # `component_error` already at 1 and never see it rise - and the watchers
+    # reading it fire on a change. The 9.5 lesson arriving on the one surface
+    # that exists to notice a failure.
+    info = parent.op(ENGINE_INFO_CHOP)
+    if info is None:
+        info = _place(
+            startup.create(parent, td.infoCHOP, ENGINE_INFO_CHOP), 250, -150
+        )
+    startup.set_par(info, "op", comp.path)
+    startup.set_menu(info, "infotype", INFO_TYPE)
+
     startup.set_par(comp, "file", str(path))
     if existing is not None:
         pulse(comp, "reload")
@@ -1856,22 +2376,33 @@ def _panel_width():
     return count * BUTTON_WIDTH + max(count - 1, 0) * PANEL_SPACING
 
 
-def _panel_height():
-    """The panel's height: its four stacked rows, with a gap between each.
+#: How tall each row in `PANEL_ROWS` is, keyed by the same name.
+#:
+#: Keyed rather than listed in parallel, which is the half of `PANEL_ROWS`'s own
+#: argument that had been left undone. That tuple exists so inserting a row is
+#: inserting a name; the height was still a positional list beside it, so a row
+#: added to one and not the other left the panel a row taller than the window
+#: showing it - and a clipped bottom row looks like a layout bug rather than a
+#: missing number. A name missing here now raises where it is summed.
+PANEL_ROW_HEIGHTS = {
+    "transport": BUTTON_HEIGHT,
+    "settings": SETTINGS_ROW_HEIGHT,
+    "audio": AUDIO_ROW_HEIGHT,
+    "parameters": PARAMETER_HEIGHT,
+    "cliplist": CLIP_LIST_HEIGHT,
+    "diagnostics": DIAGNOSTICS_HEIGHT,
+    "health": HEALTH_HEIGHT,
+}
 
-    Derived for the same reason the width is, and as a list rather than a sum
-    of named constants so that adding a row is adding a row. The window is
-    sized from this, so a taller list moves the window's bottom edge instead of
-    being cut off by it.
+
+def _panel_height():
+    """The panel's height: its stacked rows, with a gap between each.
+
+    Derived for the same reason the width is, and over `PANEL_ROWS` so that
+    adding a row is adding a row. The window is sized from this, so a taller
+    list moves the window's bottom edge instead of being cut off by it.
     """
-    rows = (
-        BUTTON_HEIGHT,
-        SETTINGS_ROW_HEIGHT,
-        AUDIO_ROW_HEIGHT,
-        PARAMETER_HEIGHT,
-        CLIP_LIST_HEIGHT,
-        DIAGNOSTICS_HEIGHT,
-    )
+    rows = tuple(PANEL_ROW_HEIGHTS[name] for name in PANEL_ROWS)
     return sum(rows) + max(len(rows) - 1, 0) * PANEL_SPACING
 
 
@@ -2080,6 +2611,10 @@ def _add_control_panel(parent, configuration, td):
     _add_parameters(panel, configuration, td)
     _add_clip_list(panel, td)
     _add_diagnostics(panel, td)
+    # Last, and under the decoder's readings rather than above them: this row
+    # reports the process those readings arrive from, so it is the thing to look
+    # at when the strip above has gone blank.
+    _add_health(panel, td)
 
     startup.report(
         f"[{startup.PACKAGE}] control panel at {panel.path}:"

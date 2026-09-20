@@ -486,6 +486,152 @@ class TestReadingWhatTheEngineSays:
         assert engine.deck_state(link.DECK_ROW) is None
 
 
+class FakeInfoChop:
+    """The host's Info CHOP on the Engine COMP: `[]` by channel name."""
+
+    path = "/project1/engineInfo"
+
+    def __init__(self, values):
+        self.values = dict(values)
+
+    def __getitem__(self, name):
+        found = self.values.get(name)
+        return None if found is None else FakeChannel(found)
+
+
+class FakeErrorComp:
+    """An Engine COMP as far as `errors()` is concerned."""
+
+    path = "/project1/engine"
+
+    def __init__(self, text=""):
+        self.text = text
+
+    def errors(self, *, recurse=False):
+        # **Keyword-only, because the real one is.** `OP_Class.htm` writes the
+        # signature as `errors(recurse=False)`, which reads as an ordinary
+        # positional default - and the app refuses it: `h.errors(True)` answers
+        # *"Call contains unexpected positional arguments"*, seen on the live
+        # Engine COMP on 2026-09-19. A fake that took it would let a caller
+        # written against the help pass here and fail there, which is the whole
+        # failure class doubles are supposed to close.
+        return self.text
+
+
+class TestEngineHealth:
+    """The host reading the boundary rather than the player across it.
+
+    Separate from `TestReadingWhatTheEngineSays` because the two are separate
+    on purpose: a state channel is something the player published and could
+    publish from another machine, and these are the host's own reading of the
+    Engine COMP in front of it. The engine cannot report its own crash.
+    """
+
+    def _host(self, monkeypatch, children):
+        parent = FakeParent(children)
+        module = types.ModuleType("td")
+        module.op = lambda path: parent if path == build.BUILD_PARENT else None
+        monkeypatch.setitem(sys.modules, "td", module)
+        return parent
+
+    def test_a_channel_reads_as_a_number(self, monkeypatch):
+        self._host(
+            monkeypatch,
+            {build.ENGINE_INFO_CHOP: FakeInfoChop({"engine_fps": 59.94})},
+        )
+        assert engine.health("engine_fps") == 59.94
+
+    def test_a_channel_the_info_chop_does_not_carry_is_none(self, monkeypatch):
+        self._host(monkeypatch, {build.ENGINE_INFO_CHOP: FakeInfoChop({})})
+        assert engine.health("component_error") is None
+
+    def test_no_info_chop_yet_is_none_rather_than_an_error(self, monkeypatch):
+        # The seconds of a launch before the build has run. None is what the
+        # health line already draws as '?'.
+        self._host(monkeypatch, {})
+        assert engine.health("engine_running") is None
+
+    def test_it_does_not_go_through_the_output_lookup(self, monkeypatch):
+        # The design property, asserted rather than described. `engine.output`
+        # finds a Null the player fed and would be repointed at a Touch In CHOP
+        # on the day the transport is a wire; this reads the Engine COMP's own
+        # Info CHOP, which on that day is deleted. Two lookups because they
+        # have two futures - and a refactor folding them together fails here.
+        def refuse(name):
+            raise AssertionError(f"health went through output({name!r})")
+
+        monkeypatch.setattr(engine, "output", refuse)
+        self._host(
+            monkeypatch,
+            {build.ENGINE_INFO_CHOP: FakeInfoChop({"engine_running": 1.0})},
+        )
+        assert engine.health("engine_running") == 1.0
+
+    def test_a_zero_is_a_reading_and_not_an_absence(self, monkeypatch):
+        # Every state channel spends most of its life at 0, and `component_none`
+        # reading 0 is the engine saying it has a component. A falsy answer
+        # collapsed into None would make the health line read '?' for a running
+        # engine.
+        self._host(
+            monkeypatch,
+            {build.ENGINE_INFO_CHOP: FakeInfoChop({"component_error": 0.0})},
+        )
+        assert engine.health("component_error") == 0.0
+
+
+class TestEngineErrors:
+    """What a raise inside the other process looks like from out here."""
+
+    def _host(self, monkeypatch, children):
+        parent = FakeParent(children)
+        module = types.ModuleType("td")
+        module.op = lambda path: parent if path == build.BUILD_PARENT else None
+        monkeypatch.setitem(sys.modules, "td", module)
+        return parent
+
+    #: A traceback as the Engine COMP hands one over: several lines, a Windows
+    #: path with backslashes in it, and quotes around the filename. Written as
+    #: the outside world produces it rather than as something tidier, because
+    #: what is being checked downstream is that it survives being written into
+    #: a parameter.
+    TRACEBACK = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\Users\\jms\\tdpy\\player.py", line 412, in command\n'
+        "    return COMMANDS[name]()\n"
+        "KeyError: 'rewind'\n"
+    )
+
+    def test_the_engines_traceback_arrives_whole(self, monkeypatch):
+        self._host(monkeypatch, {build.ENGINE_COMP: FakeErrorComp(self.TRACEBACK)})
+        assert engine.errors() == self.TRACEBACK
+
+    def test_a_healthy_engine_has_nothing_to_say(self, monkeypatch):
+        self._host(monkeypatch, {build.ENGINE_COMP: FakeErrorComp()})
+        assert engine.errors() == ""
+
+    def test_no_engine_comp_is_empty_rather_than_an_error(self, monkeypatch):
+        # Before the build has made one, and in the frames after a rebuild
+        # destroyed the panel. The watchers that call this are DAT callbacks,
+        # where a raise surfaces inconsistently.
+        self._host(monkeypatch, {})
+        assert engine.errors() == ""
+
+    def test_recurse_is_keyword_only_as_the_app_has_it(self):
+        # The control for the fake above. If this ever passes a positional, the
+        # double has stopped refusing what the real object refuses and the
+        # tests around it have stopped measuring anything.
+        with pytest.raises(TypeError):
+            FakeErrorComp().errors(True)
+
+    def test_a_traceback_survives_being_written_as_a_literal(self):
+        # What `build.paint_engine_error` does with it, checked here where the
+        # failure is visible. `Text_COMP.htm` sends anything with newlines to
+        # expression mode, so the text reaches the parameter as `repr()` - and
+        # a repr has to survive the backslashes in every Windows path in a
+        # traceback, which is exactly what naive quoting does not.
+        assert eval(repr(self.TRACEBACK)) == self.TRACEBACK
+
+
 class TestOnCommand:
     """The engine's end: a pulsed parameter becomes a transport call."""
 

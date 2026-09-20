@@ -282,6 +282,61 @@ def state(channel):
     return None if found is None else found.eval()
 
 
+def health(channel):
+    """One Engine COMP Info CHOP channel as a number, or None. **Host side.**
+
+    **Deliberately not `output()`**, though both end up calling `parent.op`.
+    An output is something the player published and could publish from another
+    machine; these channels are the host's own reading of the boundary - how
+    TouchEngine is doing, whether the component loaded, how long its frames
+    take. The engine cannot report its own crash, so this half can never cross
+    as an output, and on the day the transport becomes a wire `output()` is
+    repointed while this function is deleted along with the Engine COMP. Two
+    lookups because they have two futures.
+
+    The channel names are `Engine_COMP.htm`'s "Specific Engine COMP Info
+    Channels" section, which is the authority for which exist - the binary can
+    refuse a name but never confirm one is this operator's.
+
+    None covers the whole of "there is nothing to read yet": no Info CHOP, no
+    such channel. Callers draw something honest from that, as they do for a
+    state channel the engine has not published.
+    """
+    import td
+
+    from . import build
+
+    parent = td.op(build.BUILD_PARENT) or td.op("/")
+    chop = None if parent is None else parent.op(build.ENGINE_INFO_CHOP)
+    if chop is None:
+        return None
+    found = chop[channel]
+    return None if found is None else found.eval()
+
+
+def errors():
+    """The Engine COMP's error text, or "" if it has none. **Host side.**
+
+    What an exception inside the engine looks like from out here, traceback
+    included - spike 4, 2026-09-14. `OP_Class.htm` gives the signature as
+    `errors(recurse=False) -> str`, and the default is what the spike printed,
+    so the default is what is read.
+
+    This is the *other half* of `health()`, and the two answer different
+    questions: an Info CHOP channel says a fault happened, and this says what
+    it was. The channel is a number an expression can watch; this is a string a
+    method call produces, which is why the panel's health line is an expression
+    and its error text has to be painted.
+    """
+    import td
+
+    from . import build
+
+    parent = td.op(build.BUILD_PARENT) or td.op("/")
+    comp = None if parent is None else parent.op(build.ENGINE_COMP)
+    return "" if comp is None else comp.errors()
+
+
 def deck_state(channels):
     """The live deck's value of a per-deck channel pair, or None.
 

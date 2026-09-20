@@ -106,44 +106,67 @@ class TestPanelWidth:
 
 
 class TestPanelHeight:
-    #: The row heights `_panel_height` sums, named here so this test knows what
-    #: the panel is made of without restating how many rows that is. Adding a
-    #: row means adding a name to this tuple and nothing else - the previous
-    #: version of these tests wrote the arithmetic out longhand and broke the
-    #: moment the diagnostics strip arrived, which is the failure this avoids.
-    ROW_HEIGHTS = (
-        "BUTTON_HEIGHT",
-        "SETTINGS_ROW_HEIGHT",
-        "AUDIO_ROW_HEIGHT",
-        "PARAMETER_HEIGHT",
-        "CLIP_LIST_HEIGHT",
-        "DIAGNOSTICS_HEIGHT",
-    )
+    """The sum the control window is sized from.
+
+    `_panel_height` reads `PANEL_ROW_HEIGHTS` over `PANEL_ROWS` since 9.6, so
+    these monkeypatch that mapping rather than the constants behind it. The
+    earlier version named the constants in a parallel tuple of its own, which
+    was the same duplication the module had and broke each time a row arrived.
+    """
+
+    def _heights(self, monkeypatch, value):
+        """Give every row in PANEL_ROWS the same height, whatever the rows are."""
+        monkeypatch.setattr(
+            build, "PANEL_ROW_HEIGHTS", {name: value for name in build.PANEL_ROWS}
+        )
 
     def test_gaps_fall_between_the_rows_and_not_below_the_last(self, monkeypatch):
         # Every row 100 and every gap 10, so the answer is readable: n rows and
         # n-1 gaps. A gap below the last row is the bug this catches, and it
         # shows up as the panel being exactly one spacing too tall.
-        for name in self.ROW_HEIGHTS:
-            monkeypatch.setattr(build, name, 100)
+        self._heights(monkeypatch, 100)
         monkeypatch.setattr(build, "PANEL_SPACING", 10)
-        count = len(self.ROW_HEIGHTS)
+        count = len(build.PANEL_ROWS)
         assert build._panel_height() == count * 100 + (count - 1) * 10
 
     def test_it_sums_every_row_the_panel_actually_has(self, monkeypatch):
-        # Guards the list above against the module moving on without it. Each
-        # row is given a distinct height, so a row left out of `_panel_height`
-        # or missing from ROW_HEIGHTS changes the total.
-        for index, name in enumerate(self.ROW_HEIGHTS):
-            monkeypatch.setattr(build, name, 2 ** index)
+        # Each row a distinct power of two, so a row summed twice or skipped
+        # changes the total rather than cancelling out.
+        monkeypatch.setattr(
+            build,
+            "PANEL_ROW_HEIGHTS",
+            {name: 2 ** index for index, name in enumerate(build.PANEL_ROWS)},
+        )
         monkeypatch.setattr(build, "PANEL_SPACING", 0)
-        assert build._panel_height() == 2 ** len(self.ROW_HEIGHTS) - 1
+        assert build._panel_height() == 2 ** len(build.PANEL_ROWS) - 1
+
+    def test_every_row_on_the_panel_has_a_height(self):
+        # The trap 9.6 walked into and then closed. PANEL_ROWS decided a row's
+        # position and a separate list decided its height, so a row added to
+        # one and not the other left the panel taller than the window sized
+        # from it - and a clipped bottom row reads as a layout bug rather than
+        # as a missing number. A name missing now raises where it is summed.
+        assert set(build.PANEL_ROW_HEIGHTS) == set(build.PANEL_ROWS)
+
+    def test_a_row_with_no_height_raises_rather_than_being_skipped(
+        self, monkeypatch
+    ):
+        # The control for the test above: it has to be able to fail. A row
+        # silently worth nothing is the failure that was possible before.
+        monkeypatch.setattr(build, "PANEL_ROWS", build.PANEL_ROWS + ("mixer",))
+        with pytest.raises(KeyError):
+            build._panel_height()
 
     def test_the_window_is_not_taller_than_the_display_it_opens_on(self):
-        # 1080 on a 1440-high panel, with a title bar to spare. Worth a test
-        # because the panel has grown three times now and each time by a whole
+        # 1400, with a title bar to spare on a 1440-high display. Worth a test
+        # because the panel has grown four times now and each time by a whole
         # row, and a window taller than its display is not obviously wrong on a
         # machine with a 4K primary to open it on instead.
+        #
+        # 9.6 hit this bound rather than passing it: the health row needed 180
+        # against 60 spare, and the clip list gave up 140 to make room. The
+        # assertion is what forced that to be a decision rather than a window
+        # quietly opening off the bottom of the screen.
         assert build._panel_height() <= 1400
 
 
@@ -225,12 +248,10 @@ class TestRowOrder:
     def test_every_named_row_has_a_distinct_place(self):
         assert len(set(build.PANEL_ROWS)) == len(build.PANEL_ROWS)
 
-    def test_the_panel_stacks_as_many_rows_as_it_names(self):
-        # PANEL_ROWS decides where a row sits and `_panel_height` decides how
-        # tall the panel is. A row named in one and missing from the other is
-        # either a band drawn off the bottom edge or a strip of dead panel, and
-        # neither says which list was not updated.
-        assert len(build.PANEL_ROWS) == len(TestPanelHeight.ROW_HEIGHTS)
+    # A count of `PANEL_ROWS` against the heights beside it stood here until
+    # 9.6. The two lists it reconciled are one mapping now, so the question it
+    # asked is `TestPanelHeight.test_every_row_on_the_panel_has_a_height` -
+    # set equality rather than a length, and with a control beside it.
 
     def test_the_mixer_sits_between_the_cycle_and_the_typed_fields(self):
         assert (
@@ -263,13 +284,25 @@ class FakeChannel:
 
 
 class FakeChannels:
-    """An Info CHOP's `[]`, answering a FakeChannel per channel name."""
+    """An Info CHOP's `[]`, answering a FakeChannel per channel name.
+
+    **None for a channel that is not there, because that is what a CHOP does.**
+    This raised KeyError until 9.6, which made it stricter than the operator it
+    stands for - and that is why nothing here caught `engine_frame_msec`, a
+    channel `Engine_COMP.htm` lists and the live Info CHOP does not carry. In
+    the app the absent channel answered None, `None.eval()` raised inside the
+    parameter expression, and the readout went blank; in these tests it would
+    have raised KeyError at the point of lookup, loudly and in the wrong place.
+    A double that refuses what the real object permits hides exactly the bug
+    the real object would have.
+    """
 
     def __init__(self, values):
         self.values = values
 
     def __getitem__(self, name):
-        return FakeChannel(self.values[name])
+        found = self.values.get(name)
+        return None if found is None else FakeChannel(found)
 
 
 class TestDiagnosticsExpression:
@@ -360,6 +393,254 @@ class TestDiagnosticsExpression:
 
         for pair, _, _ in build.DIAGNOSTIC_READINGS:
             assert set(getattr(link, pair)) <= set(link.STATE_CHANNELS), pair
+
+
+#: Every Info CHOP channel the health row names, at rest: TouchEngine has not
+#: been asked for anything and the component is not loaded. Written as a dict
+#: the tests turn on one flag at a time, because the thing being checked is
+#: which flag the line picks out of a family and not what a healthy engine
+#: happens to report.
+def _engine_at_rest():
+    values = {
+        channel: 0.0 for _, states in build.HEALTH_STATES for _, channel in states
+    }
+    values.update({channel: 0.0 for channel, _, _ in build.HEALTH_READINGS})
+    return values
+
+
+class TestHealthExpression:
+    """The engine health line, which is a Python expression as the strip is.
+
+    Tested at a prompt for the reason the diagnostics strip is: its failure in
+    the app is a blank row, which looks like an engine with nothing to say
+    rather than a readout that never parsed. This one is worse in that respect,
+    because a blank health row is indistinguishable from a healthy one unless
+    you know it should be saying something.
+    """
+
+    PATH = "/project1/engineInfo"
+
+    def _expression(self):
+        return build._health_expression(
+            self.PATH, build.HEALTH_STATES, build.HEALTH_READINGS
+        )
+
+    def _line(self, values):
+        return eval(self._expression(), {"op": lambda path: FakeChannels(values)})
+
+    def test_it_is_a_valid_python_expression(self):
+        compile(self._expression(), "<expr>", "eval")
+
+    def test_it_reads_the_state_each_family_is_actually_in(self):
+        values = _engine_at_rest()
+        values["engine_running"] = 1.0
+        values["component_loaded"] = 1.0
+        values["engine_fps"] = 59.94
+        values["engine_read_ahead_misses"] = 3.0
+        assert self._line(values) == (
+            "engine running  component loaded  fps 59.9  drop 0  miss 3"
+        )
+
+    def test_a_fault_reads_as_a_fault_rather_than_as_a_missing_number(self):
+        values = _engine_at_rest()
+        values["engine_running"] = 1.0
+        values["component_error"] = 1.0
+        assert "component error" in self._line(values)
+
+    def test_a_family_with_nothing_set_says_so(self):
+        # What the line reads before the Info CHOP has cooked. '?' rather than
+        # the first label, because "none" there would be a measurement that had
+        # not been made - and this row's whole job is to be trusted about what
+        # the engine is doing.
+        assert self._line(_engine_at_rest()).startswith("engine ?  component ?")
+
+    def test_every_channel_in_a_family_is_named_in_the_expression(self):
+        # The dependency TouchDesigner tracks. A family whose channels were
+        # assembled from a prefix would read the right number and register the
+        # wrong dependency, so the line would cook when it felt like it.
+        expression = self._expression()
+        for _, states in build.HEALTH_STATES:
+            for _, channel in states:
+                assert repr(channel) in expression, channel
+
+    def test_every_reading_is_named_in_the_expression(self):
+        expression = self._expression()
+        for channel, _, _ in build.HEALTH_READINGS:
+            assert repr(channel) in expression, channel
+
+    def test_every_reference_goes_through_eval(self):
+        # `op(chop)['chan']` answers a td.Channel, and formatting one raises.
+        # The diagnostics strip shipped that bug with green tests, because its
+        # fake handed back floats and floats format fine.
+        expression = self._expression()
+        channels = sum(len(states) for _, states in build.HEALTH_STATES)
+        assert expression.count(".eval()") == channels + len(build.HEALTH_READINGS)
+
+    def test_it_does_not_work_against_plain_numbers(self):
+        # The control for the test above: the fake has to be refusing what the
+        # app refuses, or none of this measures anything.
+        expression = self._expression()
+        with pytest.raises(AttributeError):
+            eval(expression, {"op": lambda path: _engine_at_rest()})
+
+    def test_it_names_the_chop_it_was_given(self):
+        assert self.PATH in self._expression()
+
+    def test_the_channels_are_the_engine_comps_own(self):
+        # Every name here is from `Engine_COMP.htm`'s "Specific Engine COMP
+        # Info Channels" section, which is the authority for which exist - the
+        # binary can refuse a name but never confirm one is this operator's.
+        # Written out as literals rather than derived from the module, so a
+        # channel renamed in build.py fails here instead of being agreed with.
+        assert [c for c, _, _ in build.HEALTH_READINGS] == [
+            "engine_fps",
+            "engine_dropped_frames",
+            "engine_read_ahead_misses",
+        ]
+        assert build.ENGINE_ERROR_CHANNELS == ("engine_error", "component_error")
+
+    def test_the_channel_the_help_has_and_the_operator_does_not_is_gone(self):
+        # `engine_frame_msec` is in `Engine_COMP.htm`'s Info CHOP section and
+        # not on the live Info CHOP, which carries 53 channels and answers None
+        # for it - read off the running Engine COMP on 2026-09-19. Named here
+        # rather than only deleted, because the reason it left is the point: a
+        # channel list that passed every test in this file until an operator
+        # was asked.
+        named = {c for c, _, _ in build.HEALTH_READINGS}
+        named |= {c for _, states in build.HEALTH_STATES for _, c in states}
+        assert "engine_frame_msec" not in named
+
+    def test_the_error_channels_are_ones_the_line_also_reports(self):
+        # The row colours on these two and names them in its state words, so a
+        # red row always has a word explaining itself. A colour with no
+        # matching word would be a panel that says broken and not what.
+        named = {channel for _, states in build.HEALTH_STATES for _, channel in states}
+        assert set(build.ENGINE_ERROR_CHANNELS) <= named
+
+
+class TestHealthAvailable:
+    """The check that stopped one wrong channel name costing the whole row.
+
+    The failure it closes, seen on 2026-09-19: `engine_frame_msec` is in the
+    help and not on the operator, `op(chop)['engine_frame_msec']` answered
+    None, `None.eval()` raised, and the `text` parameter went into error. A
+    Text COMP in error renders blank, and blank on a black container reads as
+    empty panel - so the surface that exists to report a dead player was
+    silently saying nothing, and looked exactly like a healthy one.
+    """
+
+    def test_an_info_chop_with_everything_keeps_everything(self):
+        info = FakeChannels(_engine_at_rest())
+        states, readings, errors, missing = build._health_available(info)
+        assert states == build.HEALTH_STATES
+        assert readings == build.HEALTH_READINGS
+        assert errors == build.ENGINE_ERROR_CHANNELS
+        assert missing == ()
+
+    def test_a_channel_the_operator_lacks_is_dropped_and_named(self):
+        values = _engine_at_rest()
+        del values["engine_fps"]
+        _, readings, _, missing = build._health_available(FakeChannels(values))
+        assert "engine_fps" not in [c for c, _, _ in readings]
+        assert missing == ("engine_fps",)
+
+    def test_the_rest_of_the_row_survives_one_missing_channel(self):
+        # The whole point. Losing a number should cost that number, not the
+        # state words and not the error colour.
+        values = _engine_at_rest()
+        del values["engine_fps"]
+        states, readings, errors, _ = build._health_available(
+            FakeChannels(values)
+        )
+        assert states == build.HEALTH_STATES
+        assert errors == build.ENGINE_ERROR_CHANNELS
+        assert len(readings) == len(build.HEALTH_READINGS) - 1
+
+    def test_a_family_that_loses_one_flag_keeps_the_others(self):
+        values = _engine_at_rest()
+        del values["component_unloading"]
+        states, _, _, missing = build._health_available(FakeChannels(values))
+        families = dict(states)
+        assert "component" in families
+        assert "component_unloading" not in [c for _, c in families["component"]]
+        assert missing == ("component_unloading",)
+
+    def test_a_family_that_loses_every_flag_is_dropped_whole(self):
+        values = _engine_at_rest()
+        for _, channel in dict(build.HEALTH_STATES)["engine"]:
+            del values[channel]
+        states, _, _, _ = build._health_available(FakeChannels(values))
+        assert "engine" not in dict(states)
+
+    def test_what_survives_still_builds_an_expression_that_runs(self):
+        # The check and the expression have to agree, or this has moved the
+        # failure rather than fixed it.
+        values = _engine_at_rest()
+        del values["engine_fps"]
+        info = FakeChannels(values)
+        states, readings, _, _ = build._health_available(info)
+        expression = build._health_expression("/project1/engineInfo", states, readings)
+        result = eval(expression, {"op": lambda path: info})
+        assert "fps" not in result
+        assert result.startswith("engine ?  component ?")
+
+
+class TestHealthBackground:
+    """The row's colour, which is pulled rather than set on noticing."""
+
+    PATH = "/project1/engineInfo"
+
+    def _colour(self, values):
+        return [
+            eval(
+                build._health_background_expression(
+                    self.PATH, index, build.ENGINE_ERROR_CHANNELS
+                ),
+                {"op": lambda path: FakeChannels(values)},
+            )
+            for index in range(3)
+        ]
+
+    def test_a_healthy_engine_leaves_the_row_alone(self):
+        assert self._colour(_engine_at_rest()) == list(build.HEALTH_OK_BG)
+
+    def test_either_error_channel_reddens_the_row(self):
+        for channel in build.ENGINE_ERROR_CHANNELS:
+            values = _engine_at_rest()
+            values[channel] = 1.0
+            assert self._colour(values) == list(build.HEALTH_ERROR_BG), channel
+
+    def test_a_cleared_error_takes_the_colour_back(self):
+        # The failure an expression cannot have and a pushed colour can: a
+        # panel left red over a player that a reload fixed.
+        values = _engine_at_rest()
+        values["component_error"] = 1.0
+        assert self._colour(values) == list(build.HEALTH_ERROR_BG)
+        values["component_error"] = 0.0
+        assert self._colour(values) == list(build.HEALTH_OK_BG)
+
+    def test_it_names_both_error_channels(self):
+        for index in range(3):
+            expression = build._health_background_expression(
+                self.PATH, index, build.ENGINE_ERROR_CHANNELS
+            )
+            for channel in build.ENGINE_ERROR_CHANNELS:
+                assert repr(channel) in expression, channel
+
+    def test_there_is_one_colour_per_parameter_it_is_written_to(self):
+        # Three expressions and three parameters, and the index into one is the
+        # index into the other. A tuple shorter than the parameter list would
+        # leave a component at whatever it was, which on a red row is a colour
+        # nobody chose.
+        assert len(build.HEALTH_BG_PARS) == len(build.HEALTH_OK_BG)
+        assert len(build.HEALTH_BG_PARS) == len(build.HEALTH_ERROR_BG)
+
+    def test_the_parameters_are_the_text_comps_own(self):
+        # Literals from `bin/Lib/tdi/ops/comps/textCOMP.py`. A parameter name
+        # that does not exist is reported by `set_par` but an expression set
+        # through `getattr` would raise at build time instead, which is louder
+        # and still worth pinning.
+        assert build.HEALTH_BG_PARS == ("bgcolorr", "bgcolorg", "bgcolorb")
 
 
 class FakePulsePar:
