@@ -488,11 +488,14 @@ class TestNames:
         assert "engineProgram" in build.LEGACY_NAMES
 
     def test_relative_paths_resolve_against_the_toe_not_the_tox(self):
-        # Engine_COMP.htm, Asset Paths: "project - Relative paths inside the
-        # component are relative to the project file running TouchEngine". The
-        # default is the .tox's own folder, which is `out/` - one level below
-        # the media paths the playlist stores.
-        assert build.ENGINE_ASSET_PATHS == "project"
+        # The token read off the live parameter, which has `toe` and `tox`.
+        # Engine_COMP.htm's parameter table says `project` and `comp` for the
+        # same menu, and that is the spelling this was written as first:
+        # set_menu refused it on 2026-09-19 and named the real two. The default
+        # is the .tox's own folder, which is `out/` - one level below the media
+        # paths the playlist stores, so the wrong token here is a player that
+        # finds no clips.
+        assert build.ENGINE_ASSET_PATHS == "toe"
 
     def test_the_tox_is_written_where_git_ignores_it(self):
         assert build.ENGINE_TOX == "out/engine.tox"

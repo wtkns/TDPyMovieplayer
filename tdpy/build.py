@@ -917,16 +917,26 @@ def onReceiveMIDI(dat, rowIndex, message, channel, index, value, input, byteData
 ENGINE_COMP = "engine"
 ENGINE_CALLBACK_DAT = "engine_callbacks"
 
-#: Asset Paths: `project`, "Relative paths inside the component are relative to
-#: the project file running TouchEngine" - `Engine_COMP.htm`, which also gives
-#: the default this overrides: relative to the .tox's own folder.
+#: Asset Paths: relative paths inside the component resolve against the `.toe`
+#: rather than against the `.tox`, which is the default.
 #:
-#: **Without it nothing plays.** The playlist stores every clip relative to the
-#: repository root, which is where the .toe sits, and the .tox is generated into
-#: `out/` - so on the default every path would resolve one folder deep and every
-#: player would come up empty. Relative paths are the project's rule (a clone
-#: has to play on another machine), so the setting moves rather than the paths.
-ENGINE_ASSET_PATHS = "project"
+#: The playlist stores every clip relative to the repository root, which is
+#: where the .toe sits, and the .tox is generated into `out/` - so on the
+#: documented default those paths would be looked for inside `out/media/`.
+#: Relative paths are the project's rule (a clone has to play on another
+#: machine), so the setting moves rather than the paths. The failure that
+#: reasoning predicts has not been watched happen: the first run with this set
+#: correctly played, which is evidence the setting is right and not evidence
+#: about what the default would have done.
+#:
+#: **The token is `toe`, and the help says `project`.** `Engine_COMP.htm`'s
+#: parameter table gives this menu's items as `project` and `comp`; the live
+#: parameter has `toe` and `tox`, which is what `set_menu` reported when it
+#: refused the documented one on 2026-09-19. The same disagreement the Math
+#: CHOP's rename parameters have, caught the same way - and this is the case
+#: `set_menu` exists for, because a menu item that is simply wrong would have
+#: left the default in place and every clip unfound, with nothing said.
+ENGINE_ASSET_PATHS = "toe"
 
 #: The Parameter Execute DAT inside the engine that turns a pulsed parameter
 #: back into a transport command, and the shim it holds.
