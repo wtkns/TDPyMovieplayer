@@ -1,3 +1,7 @@
+LaunchControl_master.tox
+LaunchControl_select.tox
+
+
 # --- TouchDesigner ---------------------------------------------------------
 # Incremental saves (TouchDesigner names them Project.1.toe) and the backup folder.
 Backup/
